@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { buildRetargetMap, retargetPose, retargetTrack } from './character.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -24,7 +26,8 @@ const trackedNames = [
 const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  processing:false,recording:false,reviewMode:false,frames:[],startTime:0,recordedDuration:0,
  playback:false,playbackStart:0,lastInfer:0,lastVideoTime:-1,
- lastCapture:0,smoothed:0.45,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false};
+ lastCapture:0,smoothed:0.12,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false,
+ character:null,loadingCharacter:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0};
 let toastTimer;
 function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),4500);}
 function status(message){$('source-status').textContent=message;}
@@ -45,12 +48,14 @@ function setControls(){
  $('timeline').disabled=state.frames.length<2||state.recording;
  $('frame-count').textContent=`${state.frames.length} ключевых кадров`;
  $('rec-label').hidden=!state.recording;
+ $('load-character').disabled=state.loadingCharacter||state.recording;
+ $('reset-character').disabled=!state.character||state.loadingCharacter||state.recording;
 }
 const scene=new THREE.Scene();scene.background=new THREE.Color('#0b1524');
 const camera=new THREE.PerspectiveCamera(37,1,0.01,100);
 const stage=$('model-stage');
-const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false,powerPreference:'low-power'});
-renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.4));
+const renderer=new THREE.WebGLRenderer({antialias:false,alpha:false,powerPreference:'low-power'});
+renderer.setPixelRatio(Math.min(devicePixelRatio||1,1.0)); // Save tablet GPU for live pose detection
 renderer.setClearColor('#0b1524');renderer.outputColorSpace=THREE.SRGBColorSpace;
 stage.append(renderer.domElement);
 const orbit=new OrbitControls(camera,renderer.domElement);
@@ -136,16 +141,100 @@ rigRoot.updateMatrixWorld(true);
 skinned.bind(new THREE.Skeleton(bones));
 const rest=new Map(bones.map(b=>[b.name,b.quaternion.clone()]));
 const neutral=()=>{for(const b of bones)b.quaternion.copy(rest.get(b.name));rigRoot.updateMatrixWorld(true);};
+
+// Keep the original tracking mannequin as a source skeleton. A user-supplied
+// GLB is a separate SkinnedMesh target, never overwritten by camera tracking.
+function syncCharacter(){
+ if(!state.character)return;
+ for(const pair of state.character.mapping){
+  const src=joints[pair.sourceName.slice(9)];
+  if(src)pair.target.quaternion.copy(retargetPose(pair,src.quaternion));
+ }
+ state.character.model.updateMatrixWorld(true);
+}
+function resetCustomPose(){
+ if(!state.character)return;
+ for(const pair of state.character.mapping)pair.target.quaternion.copy(pair.targetRest);
+ state.character.model.updateMatrixWorld(true);
+}
+function detachCharacter(){
+ if(!state.character)return;
+ const {model}=state.character;scene.remove(model);
+ model.traverse(node=>{
+  node.geometry?.dispose?.();
+  for(const m of Array.isArray(node.material)?node.material:[node.material]){
+   if(!m)continue;
+   for(const value of Object.values(m))if(value?.isTexture)value.dispose();
+   m.dispose?.();
+  }
+ });
+ state.character=null;rigRoot.visible=true;
+ $('character-name').textContent='Стандартный манекен';
+ $('character-status').textContent='Можешь загрузить свой GLB с готовым скелетом.';
+ setControls();
+}
+$('load-character').addEventListener('click',()=>$('character-file').click());
+$('reset-character').addEventListener('click',()=>{
+ if(state.frames.length>1&&!window.confirm('Вернуться к манекену? Старая запись будет очищена.'))return;
+ state.playback=false;state.reviewMode=false;state.frames=[];
+ detachCharacter();neutral();resetView();setControls();toast('Стандартный манекен восстановлен');
+});
+$('character-file').addEventListener('change',async event=>{
+ const file=event.target.files?.[0];event.target.value='';if(!file)return;
+ if(state.recording||state.loadingCharacter)return;
+ if(file.size>90*1024*1024)return toast('GLB больше 90 МБ. Для планшета сначала оптимизируй модель.');
+ if(state.frames.length>1&&!window.confirm('Загрузить нового персонажа? Текущая запись будет очищена.'))return;
+ state.loadingCharacter=true;setControls();$('character-status').textContent='Загружаем GLB и ищем скелет…';
+ let url;try{
+  url=URL.createObjectURL(file);
+  const result=await new GLTFLoader().loadAsync(url);
+  const model=new THREE.Group();model.name='MoCap_Imported_Character';model.add(result.scene);
+  let hasSkin=false;result.scene.traverse(node=>{if(node.isSkinnedMesh)hasSkin=true;});
+  if(!hasSkin)throw Error('GLB не содержит привязанный скелет (SkinnedMesh). Добавь скелет и AutoSkin в Animation Studio.');
+  const map=buildRetargetMap(bones,result.scene);
+  if(map.length<8||!map.some(pair=>pair.sourceName==='mixamorigLeftLeg'||pair.sourceName==='mixamorigRightLeg'))
+   throw Error('Нужен GLB с настоящим гуманоидным скелетом: распознано '+map.length+' костей. Сначала привяжи модель в Animation Studio.');
+  const bounds=new THREE.Box3().setFromObject(result.scene);
+  if(bounds.isEmpty())throw Error('В GLB нет видимой 3D-геометрии');
+  const height=bounds.max.y-bounds.min.y;
+  if(!Number.isFinite(height)||height<1e-6)throw Error('Некорректный масштаб персонажа');
+  const k=2.1/height;model.scale.setScalar(k);
+  const center=bounds.getCenter(new THREE.Vector3());
+  model.position.set(-center.x*k,-bounds.min.y*k,-center.z*k);
+  // Compute the retarget bind-basis from the neutral mannequin, even if
+  // the camera was already moving when this GLB was opened.
+  model.updateMatrixWorld(true);
+  const sourcePose=bones.map(b=>b.quaternion.clone());
+  neutral();
+  let remap;
+  try{remap=buildRetargetMap(bones,result.scene);}
+  finally{bones.forEach((b,i)=>b.quaternion.copy(sourcePose[i]));rigRoot.updateMatrixWorld(true);}
+  detachCharacter();
+  scene.add(model);rigRoot.visible=false;
+  state.character={model,mapping:remap,name:file.name};
+  state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;
+  $('timeline').value='0';$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';
+  $('character-name').textContent=file.name;
+  $('character-status').textContent='✓ GLB загружен · '+remap.length+' совпадающих костей. Можно записывать движение.';
+  syncCharacter();resetView();toast('Персонаж загружен! '+remap.length+' суставов управляются захватом.');
+ }catch(e){
+  console.warn('GLB model import:',e);
+  $('character-status').textContent='Не удалось загрузить GLB: '+(e?.message||e);
+  toast('GLB: '+(e?.message||e));
+ }finally{if(url)URL.revokeObjectURL(url);state.loadingCharacter=false;setControls();}
+});
 const workingQ=new THREE.Quaternion(),parentQ=new THREE.Quaternion(),tempV=new THREE.Vector3();
 function orientBone(bone,relativeDirection,smoothing){
  if(!relativeDirection||relativeDirection.lengthSq()<1e-6)return;
+ // Update only the parent chain instead of recalculating the whole skeleton
+ // once for every arm, knee and finger. This is important on Android.
+ bone.parent.updateWorldMatrix(true,false);
  bone.parent.getWorldQuaternion(parentQ);
  tempV.copy(relativeDirection).normalize().applyQuaternion(parentQ.invert());
  const reference=bone.children.find(c=>c.isBone)?.position;
  if(!reference||reference.lengthSq()<1e-7)return;
  workingQ.setFromUnitVectors(reference.clone().normalize(),tempV.normalize());
  bone.quaternion.slerp(workingQ,Math.min(1,Math.max(.05,smoothing)));
- rigRoot.updateMatrixWorld(true);
 }
 // MediaPipe's semantic LEFT and RIGHT landmark indexes are never swapped.
 // The checkbox is presentation only (CSS); it never changes these coordinates.
@@ -166,7 +255,7 @@ function applyPose(data){
   if(sign){state.worldXSign=sign;state.handednessReady=true;}
  }
  const dirs=deriveDirections(landmarks,state.visibility,state.worldXSign);
- const strength=1-state.smoothed*.88;
+ const strength=Math.max(.23,1-state.smoothed*.75); // 12% default: less visual lag
  let changed=false;
  const move=(name,scale=1)=>{
   const target=dirs[name];
@@ -175,26 +264,27 @@ function applyPose(data){
  };
  // The body follows pelvis and shoulders; arms and legs use their OWN
  // independent source landmarks. An occluded limb holds its own last pose.
- move('Hips',.25);
- move('Spine1',.34);
- move('Spine2',.26);
- move('LeftShoulder',.45);
- move('RightShoulder',.45);
+ move('Hips',.65);
+ move('Spine1',.72);
+ move('Spine2',.75);
+ move('LeftShoulder',.8);
+ move('RightShoulder',.8);
  for(const side of ['Left','Right']){
-  move(side+'Arm');move(side+'ForeArm');move(side+'Hand',.7);
-  move(side+'UpLeg');move(side+'Leg');move(side+'Foot',.72);
+  move(side+'Arm');move(side+'ForeArm');move(side+'Hand',.88);
+  move(side+'UpLeg');move(side+'Leg');move(side+'Foot',.84);
  }
- move('Neck',.5);
+ move('Neck',.78);
  // Independent head tilt/yaw using ears, eyes and nose. Missing landmarks
  // never pull the opposite arm or leg into the same pose.
  const head=dirs.Head;
  if(head){
   const target=new THREE.Euler(head[0],head[1],head[2],'XYZ');
   workingQ.setFromEuler(target);
-  joints.Head.quaternion.slerp(workingQ,Math.min(1,strength*.62));
+  joints.Head.quaternion.slerp(workingQ,Math.min(1,strength*.9));
   changed=true;
  }
  rigRoot.updateMatrixWorld(true);
+ syncCharacter();
  state.lastResult=data?.landmarks?.length?data:state.lastResult;
  return changed;
 }
@@ -211,7 +301,7 @@ function applyDemo(time){
  joints.RightUpLeg.quaternion.setFromEuler(new THREE.Euler(-.18*Math.sin(time*2.6),0,0));
  joints.LeftLeg.quaternion.setFromEuler(new THREE.Euler(-.12*Math.max(0,Math.sin(time*2.6)),0,0));
  joints.RightLeg.quaternion.setFromEuler(new THREE.Euler(-.12*Math.max(0,-Math.sin(time*2.6)),0,0));
- rigRoot.updateMatrixWorld(true);
+ rigRoot.updateMatrixWorld(true);syncCharacter();
 }
 function snapshot(seconds){
  if(state.frames.length>=2700){stopRecording();toast('Достигнут лимит записи: 3 минуты');return;}
@@ -241,7 +331,7 @@ function stopRecording(){
 }
 $('record').addEventListener('click',startRecording);
 $('finish').addEventListener('click',stopRecording);
-$('clear').addEventListener('click',()=>{state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';$('timeline').value='0';neutral();setControls();toast('Запись очищена');});
+$('clear').addEventListener('click',()=>{state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';$('timeline').value='0'; neutral();syncCharacter();setControls();toast('Запись очищена');});
 $('play-capture').addEventListener('click',()=>{
  if(state.frames.length<2)return;
  state.playback=!state.playback;
@@ -265,7 +355,7 @@ function applyRecorded(time){
   const q1=new THREE.Quaternion().fromArray(upper.rotations[name]);
   bone.quaternion.copy(q0).slerp(q1,Math.max(0,Math.min(1,alpha)));
  }
- rigRoot.updateMatrixWorld(true);
+ rigRoot.updateMatrixWorld(true);syncCharacter();
 }
 async function downloadBlob(blob,filename){
   if(Capacitor.isNativePlatform()){
@@ -289,7 +379,7 @@ const safeName=()=>String($('clip-name').value||'Motion').trim().replace(/[^\p{L
 $('export-json').addEventListener('click',async()=>{
  if(state.frames.length<2)return;
  const pack={format:'MoCapStudio-fullbody-v2',fps:30,duration:state.recordedDuration,
- source:state.mode,scope:'full-body',model:'fixed Mixamo-named demo mannequin',
+ source:state.mode,scope:'full-body',model:state.character?.name||'Mixamo-named demo mannequin',
  notes:'Full-body local bone rotations; no global translation/root motion, finger capture or raw video included.',
  bones:trackedNames,frames:state.frames};
  try{await downloadBlob(new Blob([JSON.stringify(pack,null,2)],{type:'application/json'}),safeName()+'_MoCap.json');toast('JSON подготовлен для сохранения');}catch(e){toast('Не удалось сохранить JSON: '+(e?.message||e));}
@@ -297,8 +387,12 @@ $('export-json').addEventListener('click',async()=>{
 function makeClip(){
  const start=state.frames[0]?.t||0;
  const times=state.frames.map(f=>Math.max(0,f.t-start));
- const tracks=trackedNames.map(name=>new THREE.QuaternionKeyframeTrack(joints[name.slice(9)].uuid+'.quaternion',times,
-  state.frames.flatMap(f=>f.rotations[name])));
+ const tracks=state.character
+   ?state.character.mapping.filter(pair=>trackedNames.includes(pair.sourceName))
+     .map(pair=>new THREE.QuaternionKeyframeTrack(pair.target.uuid+'.quaternion',times,
+       state.frames.flatMap(f=>retargetTrack(pair,f.rotations[pair.sourceName]))))
+   :trackedNames.map(name=>new THREE.QuaternionKeyframeTrack(joints[name.slice(9)].uuid+'.quaternion',times,
+       state.frames.flatMap(f=>f.rotations[name])));
  return new THREE.AnimationClip(safeName(),-1,tracks);
 }
 $('export-glb').addEventListener('click',async()=>{
@@ -307,14 +401,14 @@ $('export-glb').addEventListener('click',async()=>{
  const save=trackedNames.map(name=>joints[name.slice(9)].quaternion.clone());
  try{
   // Export in bind pose. AnimationClip contains all captured local rotations.
-  neutral();const exporter=new GLTFExporter();
-  const glb=await exporter.parseAsync(rigRoot,{binary:true,trs:true,animations:[makeClip()],onlyVisible:false});
+  neutral();resetCustomPose();const exporter=new GLTFExporter();
+  const glb=await exporter.parseAsync(state.character?.model||rigRoot,{binary:true,trs:true,animations:[makeClip()],onlyVisible:false});
   if(!(glb instanceof ArrayBuffer))throw Error('Экспорт вернул не бинарный GLB');
   const data=new DataView(glb);if(data.getUint32(0,true)!==0x46546c67)throw Error('Неверная сигнатура GLB');
   await downloadBlob(new Blob([glb],{type:'model/gltf-binary'}),safeName()+'_MoCap.glb');
-  toast('GLB сохранён. Проверь импорт в Animation Studio.');
+  toast('GLB с анимацией подготовлен. Проверь повторной загрузкой.');
  }catch(e){console.error(e);toast('Не удалось экспортировать GLB: '+(e?.message||e));}
- finally{trackedNames.forEach((name,i)=>joints[name.slice(9)].quaternion.copy(save[i]));rigRoot.updateMatrixWorld(true);button.textContent='↓ Экспорт GLB';setControls();}
+ finally{trackedNames.forEach((name,i)=>joints[name.slice(9)].quaternion.copy(save[i]));rigRoot.updateMatrixWorld(true);syncCharacter();button.textContent='↓ Экспорт GLB';setControls();}
 });
 
 // Draw landmark overlay correctly even when the source video is letterboxed.
@@ -344,11 +438,14 @@ async function ensureLandmarker(){
  try{
   const { FilesetResolver,PoseLandmarker }=await import('@mediapipe/tasks-vision');
   const vision=await FilesetResolver.forVisionTasks(WASM_URL);
-  state.pose=await PoseLandmarker.createFromOptions(vision,{
-   baseOptions:{modelAssetPath:MODEL_URL,delegate:'CPU'},runningMode:'VIDEO',
-   numPoses:1,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.45
-  });
-  showEngine('MediaPipe готов · локальное распознавание',true);return state.pose;
+  const options=delegate=>({baseOptions:{modelAssetPath:MODEL_URL,delegate},runningMode:'VIDEO',
+   numPoses:1,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.45});
+  // GPU first (faster on compatible tablets). Graceful CPU fallback on
+  // devices without working WebGL / MediaPipe GPU delegation.
+  try{state.pose=await PoseLandmarker.createFromOptions(vision,options('GPU'));state.delegate='GPU';}
+  catch(gpuError){console.warn('GPU not available, using CPU',gpuError);
+   state.pose=await PoseLandmarker.createFromOptions(vision,options('CPU'));state.delegate='CPU';}
+  showEngine('MediaPipe '+state.delegate+' · локальное распознавание',true);return state.pose;
  }catch(e){showEngine('Не удалось загрузить MediaPipe');
   throw new Error('Ошибка локальной модели MediaPipe: '+(e?.message||e));}
 }
@@ -361,7 +458,7 @@ async function stopSource({keepPose=false}={}){
  if(state.blobURL)URL.revokeObjectURL(state.blobURL);state.blobURL=null;
  $('video-layer').style.display='none';$('video-placeholder').style.display='flex';
  ctx.clearRect(0,0,overlay.width,overlay.height);
- $('pose-label').textContent='НЕТ СКЕЛЕТА';status('Ожидание');neutral();setControls();
+ $('pose-label').textContent='НЕТ СКЕЛЕТА';status('Ожидание');neutral();syncCharacter();setControls();
  if(!keepPose)toast('Источник остановлен');
 }
 $('stop-source').addEventListener('click',()=>stopSource());
@@ -379,7 +476,7 @@ async function startCamera(){
  try{
   // Request the Android runtime CAMERA permission before WebView getUserMedia.
   if(Capacitor.isNativePlatform())await MoCapCamera.requestCamera();
-  state.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:24,max:30}}});
+  state.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:480},height:{ideal:360},frameRate:{ideal:30,max:30}}});
   video.srcObject=state.stream;video.muted=true;video.loop=false;video.controls=false;await video.play();
   showVideo();status('Готовим распознавание…');
   await ensureLandmarker();state.source=true;status('Камера активна');setControls();toast('Камера готова. Встань в полный рост, чтобы были видны руки, ноги и голова.');
@@ -400,7 +497,7 @@ $('video-input').addEventListener('change',async event=>{
 $('start-demo').addEventListener('click',async()=>{
  await stopSource({keepPose:true});state.source=true;state.demoStart=performance.now();
  $('video-placeholder').style.display='flex';$('video-placeholder').querySelector('strong').textContent='Демо: махание рукой';
- $('video-placeholder').querySelector('p').textContent='3D-манекен двигается без камеры. Нажми «Начать запись», затем «Завершить» и экспортируй GLB.';
+ $('video-placeholder').querySelector('p').textContent='3D-персонаж двигается без камеры. Нажми «Начать запись», затем «Завершить» и экспортируй GLB.';
  $('pose-label').textContent='ДЕМО-ДВИЖЕНИЕ';status('Демо активно');setControls();toast('Демо запущено — можно записать движение.');
 });
 for(const tab of document.querySelectorAll('.mode'))tab.addEventListener('click',async()=>{
@@ -408,20 +505,31 @@ for(const tab of document.querySelectorAll('.mode'))tab.addEventListener('click'
  await stopSource({keepPose:true});state.mode=next;
  document.querySelectorAll('.mode').forEach(b=>b.classList.toggle('active',b===tab));
  $('video-placeholder').querySelector('strong').textContent=next==='camera'?'Твоя камера — студия захвата':next==='video'?'Загрузи готовый ролик':'Проверь анимацию без камеры';
- $('video-placeholder').querySelector('p').textContent=next==='camera'?'Встань лицом к камере так, чтобы были видны оба плеча, локти и кисти.':next==='video'?'Поддерживаются видеоформаты, которые умеет воспроизводить браузер.':'Нажми «Запустить демо» для проверки захвата и экспорта.';
+ $('video-placeholder').querySelector('p').textContent=next==='camera'?'Встань в полный рост, чтобы были видны руки, ноги и голова.':next==='video'?'Поддерживаются видеоформаты, которые умеет воспроизводить браузер.':'Нажми «Запустить демо» для проверки захвата и экспорта.';
  $('source-note').textContent=next==='demo'?'Демо работает полностью локально — без интернета и камеры.':next==='video'?'Видео обрабатывается в браузере. Никакой отправки ролика на сервер нет.':'Камера работает внутри APK или на HTTPS-сайте. Распознавание происходит на устройстве.';
  setControls();
 });
 function infer(now){
  if(!state.pose||!state.source||video.readyState<2||video.paused||state.playback)return;
- if(now-state.lastInfer<100||state.lastVideoTime===video.currentTime)return;
+ // Old 100 ms throttle capped pose tracking at ~10 FPS even on fast devices.
+ // Aim at ~24 FPS; real throughput adapts to the detector's measured cost.
+ const interval=Math.max(32,Math.min(100,state.inferCost*1.10));
+ if(now-state.lastInfer<interval||state.lastVideoTime===video.currentTime)return;
  state.lastInfer=now;state.lastVideoTime=video.currentTime;
  try{
+  const began=performance.now();
   const result=state.pose.detectForVideo(video,now);
+  const cost=performance.now()-began;
+  state.inferCost=state.inferCost?state.inferCost*.85+cost*.15:cost;
+  state.lastInfer=began;
   const found=applyPose(result);renderLandmarks(result);
   $('pose-label').textContent=found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ';
   $('live-status').innerHTML='<span class="green-dot"></span> '+(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ');
-  if(state.recording&&found&&now-state.lastCapture>=64){snapshot((now-state.startTime)/1000);state.lastCapture=now;}
+  if(state.recording&&found&&now-state.lastCapture>=33){snapshot((now-state.startTime)/1000);state.lastCapture=now;}
+  if(now-(state.lastStatsUpdate||0)>1400){
+   $('performance-status').textContent='Распознавание: '+Math.round(state.inferCost)+' мс · '+state.delegate;
+   state.lastStatsUpdate=now;
+  }
  }catch(e){console.warn('Pose detection issue:',e);status('Ошибка кадра распознавания');}
 }
 const timer=new THREE.Clock();
@@ -441,7 +549,9 @@ function animate(){
    if(state.recording){snapshot((now-state.startTime)/1000);state.lastCapture=now;}
   }
  }else if(state.source){infer(now);}
- orbit.update();
+ // Render at 30 FPS to leave the GPU budget to live pose recognition.
+ if(now-state.lastRender<32)return;
+ state.lastRender=now;orbit.update();
  const w=Math.max(1,stage.clientWidth),h=Math.max(1,stage.clientHeight);
  if(renderer.domElement.width!==Math.round(w*renderer.getPixelRatio())||renderer.domElement.height!==Math.round(h*renderer.getPixelRatio())){
   renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();
