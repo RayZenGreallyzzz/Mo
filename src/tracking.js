@@ -25,6 +25,25 @@ export function deriveDirections(landmarks,minVisibility=.4,xSign=1){
  for(const [name,a,b] of LIMBS){const d=getVec(a,b);if(d)out[name]=d;}
  const ls=get(11),rs=get(12),lh=get(23),rh=get(24);
  const shoulder=ls&&rs?mid(ls,rs):null,hips=lh&&rh?mid(lh,rh):null;
+ // Signed 3D shoulder line tells us whether the actor faces camera,
+ // turns side-on or faces away. Unlike a 2D shoulder-width heuristic,
+ // it continues through profile using depth. Never infer yaw from an
+ // extended arm; that would rotate the whole actor during punches.
+ const shoulderAxis=ls&&rs?diff(rs,ls):null;
+ const hipAxis=lh&&rh?diff(rh,lh):null;
+ const horizontal=a=>a?[a[0],a[2]]:null;
+ const usable=a=>a&&Math.hypot(...a)>.075;
+ const sa=horizontal(shoulderAxis),ha=horizontal(hipAxis);
+ if(usable(sa)||usable(ha)){
+   let axis=usable(sa)?sa:ha;
+   // Hips help when they agree with shoulders but cannot override a
+   // clearly detected shoulder rotation with unrelated occlusion noise.
+   if(usable(sa)&&usable(ha)){
+     const dot=(sa[0]*ha[0]+sa[1]*ha[1])/(Math.hypot(...sa)*Math.hypot(...ha));
+     if(dot>.55)axis=[sa[0]*.8+ha[0]*.2,sa[1]*.8+ha[1]*.2];
+   }
+   out.BodyYaw=Math.atan2(axis[1],axis[0]);
+ }
  if(shoulder&&hips){out.Spine1=diff(hips,shoulder);out.Spine2=diff(hips,shoulder);}
  if(ls&&rs){out.LeftShoulder=diff(shoulder,ls);out.RightShoulder=diff(shoulder,rs);}
  const hipsAxis=lh&&rh?diff(rh,lh):null;
