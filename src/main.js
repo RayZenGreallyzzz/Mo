@@ -151,6 +151,12 @@ function orientBone(bone,relativeDirection,smoothing){
 // The checkbox is presentation only (CSS); it never changes these coordinates.
 // If a camera's world coordinate handedness differs, one stable sign is estimated
 // from left/right shoulders, once per source, to match the mannequin bind pose.
+function valid(landmarks,index){
+ const l=landmarks?.[index];
+ return Boolean(l && Number.isFinite(l.x) && Number.isFinite(l.y) &&
+   Number.isFinite(l.z) && (l.visibility??1)>=state.visibility &&
+   (l.presence??1)>=state.visibility);
+}
 const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
 function applyPose(data){
  const landmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
