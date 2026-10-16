@@ -6,6 +6,7 @@ import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } f
 import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose,resetDirectMixamoCalibration} from './direct-mixamo.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
+import {createSmartPoseTracker,resetSmartPoseTracker,stabilizePoseLandmarks} from './smart-pose.js';
 import {updateCalibratedHeading,resetHeading} from './body-orientation.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -33,6 +34,8 @@ const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  character:null,loadingCharacter:false,poseFrozen:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0,workerFailureReason:''};
 let poseWorker=null,workerReady=false,workerBusy=false,workerDisabled=false,workerTimer=null;
 const boneLastSeen=new Map();
+const smartPoseTracker=createSmartPoseTracker();
+let smartRecovered=0,smartRejected=0;
 function relaxStaleBones(now=performance.now()){
  for(const name of trackedNames){
   const bone=joints[name.slice(9)];
@@ -214,6 +217,7 @@ $('load-character').addEventListener('click',()=>$('character-file').click());
 $('calibrate-pose').addEventListener('click',()=>{
  if(!state.character||state.recording)return;
  resetDirectMixamoCalibration(state.character.driver);
+ resetSmartPoseTracker(smartPoseTracker);
  resetCharacterHeading();
  boneLastSeen.clear();
  toast('Новая калибровка: встань ровно лицом к камере, руки опусти на 2 секунды.');
@@ -271,7 +275,8 @@ $('character-file').addEventListener('change',async event=>{
   finally{bones.forEach((b,i)=>b.quaternion.copy(sourcePose[i]));rigRoot.updateMatrixWorld(true);}
   detachCharacter();
   scene.add(model);rigRoot.visible=false;
-  state.character={model,mapping:remap,driver:createDirectMixamoDriver(remap),
+  resetSmartPoseTracker(smartPoseTracker);
+   state.character={model,mapping:remap,driver:createDirectMixamoDriver(remap),
      baseQuaternion:model.quaternion.clone(),heading:{reference:null,offset:0},name:file.name};
   state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;
   $('timeline').value='0';$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';
@@ -314,12 +319,15 @@ function valid(landmarks,index){
    (l.presence??1)>=state.visibility);
 }
 const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
-function applyPose(data){
- const landmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
- if(!landmarks){
+function applyPose(data,frameNow=performance.now()){
+ const rawLandmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
+ if(!rawLandmarks){
   relaxStaleBones();rigRoot.updateMatrixWorld(true);syncCharacter({});
   return false;
  }
+ const processed=stabilizePoseLandmarks(smartPoseTracker,rawLandmarks,frameNow,state.visibility);
+ const landmarks=processed.landmarks;
+ smartRecovered=processed.recovered;smartRejected=processed.rejected;
  if(!state.handednessReady){
   const sign=trackingSign(landmarks,state.visibility);
   if(sign){state.worldXSign=sign;state.handednessReady=true;}
@@ -620,6 +628,7 @@ async function ensureLandmarker(){
 }
 async function stopSource({keepPose=false}={}){
  state.source=false;state.sourceGeneration++;state.poseFrozen=false;boneLastSeen.clear();
+ resetSmartPoseTracker(smartPoseTracker);smartRecovered=0;smartRejected=0;
  resetDirectMixamoCalibration(state.character?.driver);resetCharacterHeading();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
@@ -693,7 +702,7 @@ function onDetection(result,cost,capturedAt,generation){
     active:state.source,playback:state.playback,review:state.reviewMode}))return;
   state.inferCost=state.inferCost?state.inferCost*.8+cost*.2:cost;
   state.frameAge=Math.max(0,performance.now()-capturedAt);
-  const found=state.poseFrozen?false:applyPose(result);
+  const found=state.poseFrozen?false:applyPose(result,capturedAt);
   renderLandmarks(result);
   $('pose-label').textContent=state.poseFrozen?'Ⅱ ПАУЗА ПОЗЫ':(found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ');
   $('live-status').innerHTML='<span class="green-dot"></span> '+(state.poseFrozen?'ПАУЗА':(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ'));
@@ -704,6 +713,7 @@ function onDetection(result,cost,capturedAt,generation){
   if(now-(state.lastStatsUpdate||0)>1200){
     $('performance-status').textContent='Распознавание: '+Math.round(state.inferCost)+
       ' мс · задержка обработки ≈'+Math.round(state.frameAge)+' мс · '+state.delegate+
+      (smartRecovered?' · восстановлено суставов: '+smartRecovered:'')+
       (state.workerFailureReason?' · причина worker: '+state.workerFailureReason:'');
     state.lastStatsUpdate=now;
   }
