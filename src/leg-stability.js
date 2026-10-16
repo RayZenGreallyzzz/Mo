@@ -29,7 +29,11 @@ export function classifyLegActivity(memory,directions){
  // Never use an image that starts mid-kick to define "standing".
  if(!memory.reference){
    const pose=Object.values(entries).flat();
-   if(pose.every(name=>vector(d[name]) && norm(d[name])[1]<-.72)){
+   if(pose.every(name=>{
+     const v=vector(d[name]);
+     const unit=v&&norm(v);
+     return !!unit&&unit[1]<-.72;
+   })){
      memory.reference=Object.fromEntries(pose.map(name=>[name,[...d[name]]]));
    }else{
      return {calibrated:false,activeLeft:false,activeRight:false,lockLeft:true,lockRight:true};
