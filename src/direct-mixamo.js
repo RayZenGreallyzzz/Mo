@@ -11,8 +11,7 @@ const DRIVEN = new Set([
 ]);
 const KEEP_NEUTRAL = new Set([
   // Camera pose cannot measure pelvis translation, finger roll or toes reliably.
-  'hips','leftshoulder','rightshoulder','leftfoot','rightfoot',
-  'lefthand','righthand'
+  'hips','leftfoot','rightfoot','lefthand','righthand'
 ]);
 const directionOf = value => {
   if(!Array.isArray(value)||value.length!==3||!value.every(Number.isFinite))return null;
@@ -123,6 +122,28 @@ export function fitMixamoDirections(driver,directions,now=0,{smoothing=.78,missi
     }
   }
   updateTrunk(driver,directions,now,alpha,missingMs);
+  // Let the clavicle follow a punch slightly before solving the elbow.
+  // This is a *small* swing (at most 12 degrees), not an arbitrary
+  // shoulder roll or the large torso twist that used to collapse meshes.
+  for(const side of ['left','right']){
+    const clavicle=driver.byKey.get(side+'shoulder');
+    const armDirection=directionOf(directions?.[side==='left'?'LeftArm':'RightArm']);
+    if(!clavicle||!clavicle.childReference)continue;
+    if(!armDirection){
+      clavicle.bone.quaternion.slerp(clavicle.rest,.18);
+      continue;
+    }
+    clavicle.bone.parent.updateWorldMatrix(true,false);
+    const parentWorld=clavicle.bone.parent.getWorldQuaternion(new THREE.Quaternion());
+    const desired=armDirection.clone().applyQuaternion(driver.orientation)
+      .applyQuaternion(parentWorld.invert()).normalize();
+    const ref=clavicle.childReference.clone().applyQuaternion(clavicle.rest).normalize();
+    const swing=new THREE.Quaternion().setFromUnitVectors(ref,desired);
+    const candidate=clampJointQuaternion(clavicle.bone.name,clavicle.rest,
+      swing.multiply(clavicle.rest.clone()));
+    const partial=clavicle.rest.clone().slerp(candidate,.20);
+    clavicle.bone.quaternion.slerp(partial,alpha*.65);
+  }
   for(const j of driver.joints){
     if(!DRIVEN.has(j.key))continue;
     const desired=directionOf(directions?.[j.sourceName.slice(9)]);

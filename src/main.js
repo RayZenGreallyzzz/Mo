@@ -6,6 +6,7 @@ import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } f
 import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose,resetDirectMixamoCalibration} from './direct-mixamo.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
+import {updateCalibratedHeading,resetHeading} from './body-orientation.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -158,11 +159,24 @@ const neutral=()=>{for(const b of bones)b.quaternion.copy(rest.get(b.name));rigR
 
 // Keep the original tracking mannequin as a source skeleton. A user-supplied
 // GLB is a separate SkinnedMesh target, never overwritten by camera tracking.
+function resetCharacterHeading(){
+ const character=state.character;
+ if(!character)return;
+ resetHeading(character.heading);
+ character.model.quaternion.copy(character.baseQuaternion);
+ character.model.updateMatrixWorld(true);
+}
 function syncCharacter(directions=null){
  if(!state.character)return;
  // On live camera/video drive the actual Mixamo rig directly. Never let
  // synthetic mannequin hip/spine corrections fold a user GLB.
  if(state.source&&state.mode!=='demo'&&!state.reviewMode&&!state.playback){
+  if(Number.isFinite(directions?.BodyYaw)){
+   const yaw=updateCalibratedHeading(state.character.heading,directions.BodyYaw);
+   const turn=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),-yaw);
+   state.character.model.quaternion.copy(state.character.baseQuaternion).multiply(turn);
+   state.character.model.updateMatrixWorld(true);
+  }
   fitMixamoDirections(state.character.driver,directions||{},performance.now(),
     {smoothing:.78,missingMs:550});
  }else{
@@ -177,6 +191,7 @@ function syncCharacter(directions=null){
 function resetCustomPose(){
  if(!state.character)return;
  for(const pair of state.character.mapping)pair.target.quaternion.copy(pair.targetRest);
+ state.character.model.quaternion.copy(state.character.baseQuaternion);
  state.character.model.updateMatrixWorld(true);
 }
 function detachCharacter(){
@@ -199,6 +214,7 @@ $('load-character').addEventListener('click',()=>$('character-file').click());
 $('calibrate-pose').addEventListener('click',()=>{
  if(!state.character||state.recording)return;
  resetDirectMixamoCalibration(state.character.driver);
+ resetCharacterHeading();
  boneLastSeen.clear();
  toast('Новая калибровка: встань ровно лицом к камере, руки опусти на 2 секунды.');
  status('Калибровка: стой ровно перед камерой');
@@ -208,6 +224,7 @@ $('reset-pose').addEventListener('click',()=>{
  if(state.poseFrozen){
   state.poseFrozen=false;boneLastSeen.clear();
   resetDirectMixamoCalibration(state.character?.driver);
+  resetCharacterHeading();
   toast('Захват движений возобновлён — встань ровно перед камерой.');
  }else{
   // Freeze new camera rotations so the original GLB can be inspected.
@@ -254,7 +271,8 @@ $('character-file').addEventListener('change',async event=>{
   finally{bones.forEach((b,i)=>b.quaternion.copy(sourcePose[i]));rigRoot.updateMatrixWorld(true);}
   detachCharacter();
   scene.add(model);rigRoot.visible=false;
-  state.character={model,mapping:remap,driver:createDirectMixamoDriver(remap),name:file.name};
+  state.character={model,mapping:remap,driver:createDirectMixamoDriver(remap),
+     baseQuaternion:model.quaternion.clone(),heading:{reference:null,offset:0},name:file.name};
   state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;
   $('timeline').value='0';$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';
   $('character-name').textContent=file.name;
@@ -367,7 +385,8 @@ function snapshot(seconds){
  const t=Math.max(0,seconds);
  if(state.frames.length&&t<=state.frames.at(-1).t)return;
  state.frames.push({t,rotations,
-  targetRotations:state.character?.driver?captureDirectMixamoPose(state.character.driver):null});
+  targetRotations:state.character?.driver?captureDirectMixamoPose(state.character.driver):null,
+  rootQuaternion:state.character?.model.quaternion.toArray()||null});
  state.recordedDuration=t;
  $('timer').textContent=formatTime(t);
  $('frame-count').textContent=state.frames.length+' ключевых кадров';
@@ -423,6 +442,12 @@ function applyRecorded(time){
     .slerp(new THREE.Quaternion().fromArray(b),Math.max(0,Math.min(1,alpha))).toArray();
   }
   applyDirectMixamoPose(state.character.driver,pose);
+  if(Array.isArray(lower.rootQuaternion)&&Array.isArray(upper.rootQuaternion)){
+    const q0=new THREE.Quaternion().fromArray(lower.rootQuaternion);
+    const q1=new THREE.Quaternion().fromArray(upper.rootQuaternion);
+    state.character.model.quaternion.copy(q0.slerp(q1,Math.max(0,Math.min(1,alpha))));
+    state.character.model.updateMatrixWorld(true);
+  }
  }
 }
 async function downloadBlob(blob,filename){
@@ -448,7 +473,7 @@ $('export-json').addEventListener('click',async()=>{
  if(state.frames.length<2)return;
  const pack={format:'MoCapStudio-fullbody-v2',fps:30,duration:state.recordedDuration,
  source:state.mode,scope:'full-body',model:state.character?.name||'Mixamo-named demo mannequin',
- notes:'Full-body local bone rotations; no global translation/root motion, finger capture or raw video included.',
+ notes:'Full-body local bone rotations and imported avatar root yaw; no global translation, finger capture or raw video included.',
  bones:trackedNames,frames:state.frames};
  try{await downloadBlob(new Blob([JSON.stringify(pack,null,2)],{type:'application/json'}),safeName()+'_MoCap.json');toast('JSON подготовлен для сохранения');}catch(e){toast('Не удалось сохранить JSON: '+(e?.message||e));}
 });
@@ -462,6 +487,12 @@ function makeClip(){
           retargetTrack(pair,f.rotations[pair.sourceName]))))
    :trackedNames.map(name=>new THREE.QuaternionKeyframeTrack(joints[name.slice(9)].uuid+'.quaternion',times,
        state.frames.flatMap(f=>f.rotations[name])));
+ // Persist the same full-character facing movement shown in the preview.
+ // Animating hips alone would NOT turn detached mesh/armor objects in a GLB.
+ if(state.character&&state.frames.every(f=>Array.isArray(f.rootQuaternion))){
+   tracks.push(new THREE.QuaternionKeyframeTrack(state.character.model.uuid+'.quaternion',
+     times,state.frames.flatMap(f=>f.rootQuaternion)));
+ }
  return new THREE.AnimationClip(safeName(),-1,tracks);
 }
 $('export-glb').addEventListener('click',async()=>{
@@ -469,6 +500,7 @@ $('export-glb').addEventListener('click',async()=>{
  const button=$('export-glb');button.disabled=true;button.textContent='◌ Создаём GLB…';
  const save=trackedNames.map(name=>joints[name.slice(9)].quaternion.clone());
  const savedAvatar=state.character?.driver?captureDirectMixamoPose(state.character.driver):null;
+ const savedRoot=state.character?.model.quaternion.clone()||null;
  try{
   // Export in bind pose. AnimationClip contains all captured local rotations.
   neutral();resetCustomPose();const exporter=new GLTFExporter();
@@ -483,6 +515,7 @@ $('export-glb').addEventListener('click',async()=>{
   rigRoot.updateMatrixWorld(true);syncCharacter();
   if(savedAvatar&&state.character?.driver){
     applyDirectMixamoPose(state.character.driver,savedAvatar);
+    if(savedRoot)state.character.model.quaternion.copy(savedRoot);
     state.character.model.updateMatrixWorld(true);
   }
   button.textContent='↓ Экспорт GLB';setControls();
@@ -587,7 +620,7 @@ async function ensureLandmarker(){
 }
 async function stopSource({keepPose=false}={}){
  state.source=false;state.sourceGeneration++;state.poseFrozen=false;boneLastSeen.clear();
- resetDirectMixamoCalibration(state.character?.driver);state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
+ resetDirectMixamoCalibration(state.character?.driver);resetCharacterHeading();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
  if(state.stream){for(const t of state.stream.getTracks())t.stop();state.stream=null;}
