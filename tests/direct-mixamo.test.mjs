@@ -2,15 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
 import {buildRetargetMap} from '../src/character.js';
-import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose}
+import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose,resetDirectMixamoCalibration}
  from '../src/direct-mixamo.js';
 
 function makeRig(yaw=0){
  const group=new THREE.Group();group.rotation.y=yaw;
  const hips=new THREE.Bone();hips.name='mixamorigHips';group.add(hips);
  const spine=new THREE.Bone();spine.name='mixamorigSpine1';spine.position.y=.4;hips.add(spine);
+ const chest=new THREE.Bone();chest.name='mixamorigSpine2';chest.position.y=.18;spine.add(chest);
+ const neck=new THREE.Bone();neck.name='mixamorigNeck';neck.position.y=.16;chest.add(neck);
+ const head=new THREE.Bone();head.name='mixamorigHead';head.position.y=.15;neck.add(head);
  const makeArm=(side,sign)=>{
-  const shoulder=new THREE.Bone();shoulder.name='mixamorig'+side+'Shoulder';shoulder.position.x=sign*.25;spine.add(shoulder);
+  const shoulder=new THREE.Bone();shoulder.name='mixamorig'+side+'Shoulder';shoulder.position.x=sign*.25;chest.add(shoulder);
   const arm=new THREE.Bone();arm.name='mixamorig'+side+'Arm';arm.position.x=sign*.10;shoulder.add(arm);
   const forearm=new THREE.Bone();forearm.name='mixamorig'+side+'ForeArm';forearm.position.x=sign*.35;arm.add(forearm);
   const hand=new THREE.Bone();hand.name='mixamorig'+side+'Hand';hand.position.x=sign*.28;forearm.add(hand);
@@ -18,7 +21,7 @@ function makeRig(yaw=0){
  };
  const left=makeArm('Left',1),right=makeArm('Right',-1);
  group.updateWorldMatrix(true,true);
- return {group,hips,spine,left,right};
+ return {group,hips,spine,chest,neck,head,left,right};
 }
 function create(yaw=0){
  const src=makeRig(),target=makeRig(yaw);
@@ -69,4 +72,41 @@ test('non-finite or missing input cannot rotate joints',()=>{
  fitMixamoDirections(driver,{LeftArm:[NaN,0,0],RightArm:[0,0,0]},1000);
  assert.ok(target.left.arm.quaternion.angleTo(new THREE.Quaternion())<1e-8);
  assert.ok(target.right.arm.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+});
+
+test('calibrated camera torso and head move without moving pelvis',()=>{
+ const {driver,target}=create();
+ fitMixamoDirections(driver,{Spine1:[0,1,0],Head:[0,0,0]},1000);
+ assert.ok(target.spine.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+ fitMixamoDirections(driver,{Spine1:[.26,.96,0],Head:[.20,.19,-.15]},1100);
+ assert.ok(target.spine.quaternion.angleTo(new THREE.Quaternion())>.01);
+ assert.ok(target.chest.quaternion.angleTo(new THREE.Quaternion())>.01);
+ assert.ok(target.head.quaternion.angleTo(new THREE.Quaternion())>.01);
+ assert.ok(target.neck.quaternion.angleTo(new THREE.Quaternion())>.005);
+ assert.ok(target.hips.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+});
+test('head and torso stop applying bad landmarks and re-calibration restores neutral',()=>{
+ const {driver,target}=create();
+ fitMixamoDirections(driver,{Spine1:[0,1,0],Head:[0,0,0]},1000);
+ fitMixamoDirections(driver,{Spine1:[.25,.96,0],Head:[.17,.10,0]},1100);
+ const angled=target.spine.quaternion.angleTo(new THREE.Quaternion());
+ fitMixamoDirections(driver,{Spine1:[1,0,0],Head:[NaN,0,0]},2000);
+ assert.ok(target.spine.quaternion.angleTo(new THREE.Quaternion())<angled);
+ resetDirectMixamoCalibration(driver);
+ assert.ok(target.spine.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+ assert.ok(target.head.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+ fitMixamoDirections(driver,{Spine1:[.25,.96,0],Head:[.17,.10,0]},2200);
+ assert.ok(target.spine.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+ assert.ok(target.head.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+});
+test('full-body target rotations are preserved by capture/replay',()=>{
+ const {driver,target}=create();
+ fitMixamoDirections(driver,{Spine1:[0,1,0],Head:[0,0,0],LeftArm:[1,0,0]},1000);
+ fitMixamoDirections(driver,{Spine1:[.22,.97,0],Head:[.10,.15,0],LeftArm:[0,1,0]},1100);
+ const frame=captureDirectMixamoPose(driver);
+ const oldHead=target.head.quaternion.clone(),oldSpine=target.spine.quaternion.clone();
+ target.head.quaternion.identity();target.spine.quaternion.identity();
+ applyDirectMixamoPose(driver,frame);
+ assert.ok(target.head.quaternion.angleTo(oldHead)<1e-6);
+ assert.ok(target.spine.quaternion.angleTo(oldSpine)<1e-6);
 });
