@@ -473,7 +473,7 @@ $('export-json').addEventListener('click',async()=>{
  if(state.frames.length<2)return;
  const pack={format:'MoCapStudio-fullbody-v2',fps:30,duration:state.recordedDuration,
  source:state.mode,scope:'full-body',model:state.character?.name||'Mixamo-named demo mannequin',
- notes:'Full-body local bone rotations; no global translation/root motion, finger capture or raw video included.',
+ notes:'Full-body local bone rotations and imported avatar root yaw; no global translation, finger capture or raw video included.',
  bones:trackedNames,frames:state.frames};
  try{await downloadBlob(new Blob([JSON.stringify(pack,null,2)],{type:'application/json'}),safeName()+'_MoCap.json');toast('JSON подготовлен для сохранения');}catch(e){toast('Не удалось сохранить JSON: '+(e?.message||e));}
 });
@@ -487,6 +487,12 @@ function makeClip(){
           retargetTrack(pair,f.rotations[pair.sourceName]))))
    :trackedNames.map(name=>new THREE.QuaternionKeyframeTrack(joints[name.slice(9)].uuid+'.quaternion',times,
        state.frames.flatMap(f=>f.rotations[name])));
+ // Persist the same full-character facing movement shown in the preview.
+ // Animating hips alone would NOT turn detached mesh/armor objects in a GLB.
+ if(state.character&&state.frames.every(f=>Array.isArray(f.rootQuaternion))){
+   tracks.push(new THREE.QuaternionKeyframeTrack(state.character.model.uuid+'.quaternion',
+     times,state.frames.flatMap(f=>f.rootQuaternion)));
+ }
  return new THREE.AnimationClip(safeName(),-1,tracks);
 }
 $('export-glb').addEventListener('click',async()=>{
@@ -494,6 +500,7 @@ $('export-glb').addEventListener('click',async()=>{
  const button=$('export-glb');button.disabled=true;button.textContent='◌ Создаём GLB…';
  const save=trackedNames.map(name=>joints[name.slice(9)].quaternion.clone());
  const savedAvatar=state.character?.driver?captureDirectMixamoPose(state.character.driver):null;
+ const savedRoot=state.character?.model.quaternion.clone()||null;
  try{
   // Export in bind pose. AnimationClip contains all captured local rotations.
   neutral();resetCustomPose();const exporter=new GLTFExporter();
@@ -508,6 +515,7 @@ $('export-glb').addEventListener('click',async()=>{
   rigRoot.updateMatrixWorld(true);syncCharacter();
   if(savedAvatar&&state.character?.driver){
     applyDirectMixamoPose(state.character.driver,savedAvatar);
+    if(savedRoot)state.character.model.quaternion.copy(savedRoot);
     state.character.model.updateMatrixWorld(true);
   }
   button.textContent='↓ Экспорт GLB';setControls();
