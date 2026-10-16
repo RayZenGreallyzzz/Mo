@@ -3,6 +3,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } from './character.js';
+import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose} from './direct-mixamo.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
@@ -34,7 +35,7 @@ const boneLastSeen=new Map();
 function relaxStaleBones(now=performance.now()){
  for(const name of trackedNames){
   const bone=joints[name.slice(9)];
-  if(bone && now-(boneLastSeen.get(name)||0)>700)
+  if(bone && now-(boneLastSeen.get(name.slice(9))||0)>700)
    bone.quaternion.slerp(rest.get(bone.name),.12);
  }
 }
@@ -156,11 +157,19 @@ const neutral=()=>{for(const b of bones)b.quaternion.copy(rest.get(b.name));rigR
 
 // Keep the original tracking mannequin as a source skeleton. A user-supplied
 // GLB is a separate SkinnedMesh target, never overwritten by camera tracking.
-function syncCharacter(){
+function syncCharacter(directions=null){
  if(!state.character)return;
- for(const pair of state.character.mapping){
-  const src=joints[pair.sourceName.slice(9)];
-  if(src)pair.target.quaternion.copy(retargetPose(pair,src.quaternion));
+ // On live camera/video drive the actual Mixamo rig directly. Never let
+ // synthetic mannequin hip/spine corrections fold a user GLB.
+ if(state.source&&state.mode!=='demo'&&!state.reviewMode&&!state.playback){
+  fitMixamoDirections(state.character.driver,directions||{},performance.now(),
+    {smoothing:.78,missingMs:550});
+ }else{
+  // Demo and legacy fallback use rest-basis quaternion retargeting.
+  for(const pair of state.character.mapping){
+   const src=joints[pair.sourceName.slice(9)];
+   if(src)pair.target.quaternion.copy(retargetPose(pair,src.quaternion));
+  }
  }
  state.character.model.updateMatrixWorld(true);
 }
@@ -236,7 +245,7 @@ $('character-file').addEventListener('change',async event=>{
   finally{bones.forEach((b,i)=>b.quaternion.copy(sourcePose[i]));rigRoot.updateMatrixWorld(true);}
   detachCharacter();
   scene.add(model);rigRoot.visible=false;
-  state.character={model,mapping:remap,name:file.name};
+  state.character={model,mapping:remap,driver:createDirectMixamoDriver(remap),name:file.name};
   state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;
   $('timeline').value='0';$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';
   $('character-name').textContent=file.name;
@@ -281,7 +290,7 @@ const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
 function applyPose(data){
  const landmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
  if(!landmarks){
-  relaxStaleBones();rigRoot.updateMatrixWorld(true);syncCharacter();
+  relaxStaleBones();rigRoot.updateMatrixWorld(true);syncCharacter({});
   return false;
  }
  if(!state.handednessReady){
@@ -323,7 +332,7 @@ function applyPose(data){
  }
  relaxStaleBones();
  rigRoot.updateMatrixWorld(true);
- syncCharacter();
+ syncCharacter(dirs);
  state.lastResult=data?.landmarks?.length?data:state.lastResult;
  return changed;
 }
@@ -348,7 +357,8 @@ function snapshot(seconds){
  for(const name of trackedNames){rotations[name]=joints[name.slice(9)].quaternion.toArray();}
  const t=Math.max(0,seconds);
  if(state.frames.length&&t<=state.frames.at(-1).t)return;
- state.frames.push({t,rotations});
+ state.frames.push({t,rotations,
+  targetRotations:state.character?.driver?captureDirectMixamoPose(state.character.driver):null});
  state.recordedDuration=t;
  $('timer').textContent=formatTime(t);
  $('frame-count').textContent=state.frames.length+' ключевых кадров';
@@ -370,7 +380,7 @@ function stopRecording(){
 }
 $('record').addEventListener('click',startRecording);
 $('finish').addEventListener('click',stopRecording);
-$('clear').addEventListener('click',()=>{state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';$('timeline').value='0'; neutral();syncCharacter();setControls();toast('Запись очищена');});
+$('clear').addEventListener('click',()=>{state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;$('timer').textContent='00:00.0';$('timeline-label').textContent='Нет записи';$('timeline').value='0'; neutral();resetCustomPose();syncCharacter();setControls();toast('Запись очищена');});
 $('play-capture').addEventListener('click',()=>{
  if(state.frames.length<2)return;
  state.playback=!state.playback;
@@ -395,6 +405,16 @@ function applyRecorded(time){
   bone.quaternion.copy(q0).slerp(q1,Math.max(0,Math.min(1,alpha)));
  }
  rigRoot.updateMatrixWorld(true);syncCharacter();
+ if(state.character?.driver && lower.targetRotations && upper.targetRotations){
+  const pose={};
+  for(const joint of state.character.driver.joints){
+   const a=lower.targetRotations[joint.sourceName];
+   const b=upper.targetRotations[joint.sourceName];
+   if(a&&b)pose[joint.sourceName]=new THREE.Quaternion().fromArray(a)
+    .slerp(new THREE.Quaternion().fromArray(b),Math.max(0,Math.min(1,alpha))).toArray();
+  }
+  applyDirectMixamoPose(state.character.driver,pose);
+ }
 }
 async function downloadBlob(blob,filename){
   if(Capacitor.isNativePlatform()){
@@ -429,7 +449,8 @@ function makeClip(){
  const tracks=state.character
    ?state.character.mapping.filter(pair=>trackedNames.includes(pair.sourceName))
      .map(pair=>new THREE.QuaternionKeyframeTrack(pair.target.uuid+'.quaternion',times,
-       state.frames.flatMap(f=>retargetTrack(pair,f.rotations[pair.sourceName]))))
+       state.frames.flatMap(f=>f.targetRotations?.[pair.sourceName]||
+          retargetTrack(pair,f.rotations[pair.sourceName]))))
    :trackedNames.map(name=>new THREE.QuaternionKeyframeTrack(joints[name.slice(9)].uuid+'.quaternion',times,
        state.frames.flatMap(f=>f.rotations[name])));
  return new THREE.AnimationClip(safeName(),-1,tracks);
