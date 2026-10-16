@@ -233,7 +233,11 @@ function orientBone(bone,relativeDirection,smoothing){
  bone.parent.updateWorldMatrix(true,false);
  bone.parent.getWorldQuaternion(parentQ);
  tempV.copy(relativeDirection).normalize().applyQuaternion(parentQ.invert());
- const reference=bone.children.find(c=>c.isBone)?.position;
+ // Terminal hand bones have no child in the minimal Mixamo mannequin.
+ // Still rotate them from wrist → hand landmark for GLB retargeting.
+ const reference=bone.children.find(c=>c.isBone)?.position ||
+   (bone.name.endsWith('LeftHand')?new THREE.Vector3(1,0,0):
+    bone.name.endsWith('RightHand')?new THREE.Vector3(-1,0,0):null);
  if(!reference||reference.lengthSq()<1e-7)return;
  workingQ.setFromUnitVectors(reference.clone().normalize(),tempV.normalize());
  bone.quaternion.slerp(workingQ,Math.min(1,Math.max(.05,smoothing)));
@@ -520,11 +524,18 @@ async function stopSource({keepPose=false}={}){
  if(!keepPose)toast('Источник остановлен');
 }
 $('stop-source').addEventListener('click',()=>stopSource());
+function syncMirrorPreview(){
+ const mirror=$('mirror').checked;
+ $('video-layer').classList.toggle('no-mirror',!mirror);
+ // Match the 3D PREVIEW to the selfie mirror without changing any skeleton
+ // quaternion, semantic left/right landmark, recorded key or exported GLB.
+ stage.classList.toggle('mirrored-preview',mirror&&state.mode!=='demo');
+}
 function showVideo(){
  $('video-layer').style.display='block';$('video-placeholder').style.display='none';
- $('video-layer').classList.toggle('no-mirror',!$('mirror').checked);
+ syncMirrorPreview();
 }
-$('mirror').addEventListener('change',()=>{$('video-layer').classList.toggle('no-mirror',!$('mirror').checked);});
+$('mirror').addEventListener('change',syncMirrorPreview);
 $('smooth').addEventListener('input',()=>{state.smoothed=Number($('smooth').value)/100;$('smooth-value').textContent=$('smooth').value+'%';});
 $('confidence').addEventListener('input',()=>{state.visibility=Number($('confidence').value)/100;$('confidence-value').textContent=$('confidence').value+'%';});
 async function startCamera(){
@@ -560,7 +571,7 @@ $('start-demo').addEventListener('click',async()=>{
 });
 for(const tab of document.querySelectorAll('.mode'))tab.addEventListener('click',async()=>{
  const next=tab.dataset.mode;if(next===state.mode)return;
- await stopSource({keepPose:true});state.mode=next;
+ await stopSource({keepPose:true});state.mode=next;syncMirrorPreview();
  document.querySelectorAll('.mode').forEach(b=>b.classList.toggle('active',b===tab));
  $('video-placeholder').querySelector('strong').textContent=next==='camera'?'Твоя камера — студия захвата':next==='video'?'Загрузи готовый ролик':'Проверь анимацию без камеры';
  $('video-placeholder').querySelector('p').textContent=next==='camera'?'Встань в полный рост, чтобы были видны руки, ноги и голова.':next==='video'?'Поддерживаются видеоформаты, которые умеет воспроизводить браузер.':'Нажми «Запустить демо» для проверки захвата и экспорта.';
@@ -644,7 +655,7 @@ function animate(){
  }
  renderer.render(scene,camera);
 }
-neutral();setControls();animate();
+neutral();setControls();syncMirrorPreview();animate();
 showEngine('Демо готово · полный скелет тела.');
 const splash=$('launch-splash');
 if(splash)setTimeout(()=>splash.classList.add('loaded'),1850);
