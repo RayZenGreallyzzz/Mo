@@ -459,6 +459,7 @@ $('export-glb').addEventListener('click',async()=>{
  if(state.recording||state.frames.length<2)return;
  const button=$('export-glb');button.disabled=true;button.textContent='◌ Создаём GLB…';
  const save=trackedNames.map(name=>joints[name.slice(9)].quaternion.clone());
+ const savedAvatar=state.character?.driver?captureDirectMixamoPose(state.character.driver):null;
  try{
   // Export in bind pose. AnimationClip contains all captured local rotations.
   neutral();resetCustomPose();const exporter=new GLTFExporter();
@@ -468,7 +469,15 @@ $('export-glb').addEventListener('click',async()=>{
   await downloadBlob(new Blob([glb],{type:'model/gltf-binary'}),safeName()+'_MoCap.glb');
   toast('GLB с анимацией подготовлен. Проверь повторной загрузкой.');
  }catch(e){console.error(e);toast('Не удалось экспортировать GLB: '+(e?.message||e));}
- finally{trackedNames.forEach((name,i)=>joints[name.slice(9)].quaternion.copy(save[i]));rigRoot.updateMatrixWorld(true);syncCharacter();button.textContent='↓ Экспорт GLB';setControls();}
+ finally{
+  trackedNames.forEach((name,i)=>joints[name.slice(9)].quaternion.copy(save[i]));
+  rigRoot.updateMatrixWorld(true);syncCharacter();
+  if(savedAvatar&&state.character?.driver){
+    applyDirectMixamoPose(state.character.driver,savedAvatar);
+    state.character.model.updateMatrixWorld(true);
+  }
+  button.textContent='↓ Экспорт GLB';setControls();
+ }
 });
 
 // Draw landmark overlay correctly even when the source video is letterboxed.
