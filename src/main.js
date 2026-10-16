@@ -3,7 +3,7 @@ import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } from './character.js';
-import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose} from './direct-mixamo.js';
+import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose,resetDirectMixamoCalibration} from './direct-mixamo.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
@@ -29,7 +29,7 @@ const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  processing:false,recording:false,reviewMode:false,frames:[],startTime:0,recordedDuration:0,
  playback:false,playbackStart:0,lastInfer:0,lastVideoTime:-1,
  lastCapture:0,smoothed:0.12,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false,
- character:null,loadingCharacter:false,poseFrozen:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0};
+ character:null,loadingCharacter:false,poseFrozen:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0,workerFailureReason:''};
 let poseWorker=null,workerReady=false,workerBusy=false,workerDisabled=false,workerTimer=null;
 const boneLastSeen=new Map();
 function relaxStaleBones(now=performance.now()){
@@ -62,6 +62,7 @@ function setControls(){
  $('load-character').disabled=state.loadingCharacter||state.recording;
  $('reset-character').disabled=!state.character||state.loadingCharacter||state.recording;
  $('reset-pose').disabled=state.loadingCharacter||state.recording;
+ $('calibrate-pose').disabled=!state.character||state.loadingCharacter||state.recording;
  $('reset-pose').textContent=state.poseFrozen?'▶ Продолжить захват':'↺ Сбросить позу';
 }
 const scene=new THREE.Scene();scene.background=new THREE.Color('#0b1524');
@@ -195,11 +196,19 @@ function detachCharacter(){
  setControls();
 }
 $('load-character').addEventListener('click',()=>$('character-file').click());
+$('calibrate-pose').addEventListener('click',()=>{
+ if(!state.character||state.recording)return;
+ resetDirectMixamoCalibration(state.character.driver);
+ boneLastSeen.clear();
+ toast('Новая калибровка: встань ровно лицом к камере, руки опусти на 2 секунды.');
+ status('Калибровка: стой ровно перед камерой');
+});
 $('reset-pose').addEventListener('click',()=>{
  if(state.recording)return;
  if(state.poseFrozen){
   state.poseFrozen=false;boneLastSeen.clear();
-  toast('Захват движений возобновлён');
+  resetDirectMixamoCalibration(state.character?.driver);
+  toast('Захват движений возобновлён — встань ровно перед камерой.');
  }else{
   // Freeze new camera rotations so the original GLB can be inspected.
   state.poseFrozen=true;neutral();resetCustomPose();boneLastSeen.clear();
@@ -508,6 +517,7 @@ function shutdownWorker(){
 function recoverWorker(reason){
   if(!workerReady)return;
   console.warn('Worker pose failure, trying compatible foreground engine:',reason);
+   state.workerFailureReason=String(reason?.message||reason||'worker error').slice(0,90);
   shutdownWorker();workerDisabled=true;state.processing=false;state.inferCost=0;
   state.lastInfer=0;state.lastVideoTime=-1;
   showEngine('Фоновый захват недоступен · переключаемся');
@@ -539,7 +549,7 @@ async function ensureLandmarker(){
         candidate.onerror=e=>finish(new Error(e.message||'Worker initialization error'));
         candidate.postMessage({type:'init',wasmUrl:WASM_URL,modelUrl:MODEL_URL});
       });
-      poseWorker=candidate;workerReady=true;workerBusy=false;state.delegate='CPU · worker';
+      poseWorker=candidate;workerReady=true;workerBusy=false;state.delegate='CPU · worker';state.workerFailureReason='';
       candidate.onmessage=({data})=>{
         if(data?.type==='result'){
           if(workerTimer){clearTimeout(workerTimer);workerTimer=null;}
@@ -552,6 +562,7 @@ async function ensureLandmarker(){
       return true;
     }catch(error){
       candidate?.terminate();workerDisabled=true;
+      state.workerFailureReason=String(error?.message||error).slice(0,90);
       console.warn('Worker not available on this WebView:',error);
     }
   }
@@ -567,7 +578,7 @@ async function ensureLandmarker(){
       state.pose=await PoseLandmarker.createFromOptions(vision,options('CPU'));
       state.delegate='CPU · основной поток';
     }
-    showEngine('MediaPipe '+state.delegate,true);
+    showEngine('MediaPipe '+state.delegate+(state.workerFailureReason?' · worker недоступен':''),true);
     return true;
   }catch(error){
     showEngine('Не удалось загрузить MediaPipe');
@@ -575,7 +586,8 @@ async function ensureLandmarker(){
   }
 }
 async function stopSource({keepPose=false}={}){
- state.source=false;state.sourceGeneration++;state.poseFrozen=false;boneLastSeen.clear();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
+ state.source=false;state.sourceGeneration++;state.poseFrozen=false;boneLastSeen.clear();
+ resetDirectMixamoCalibration(state.character?.driver);state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
  if(state.stream){for(const t of state.stream.getTracks())t.stop();state.stream=null;}
@@ -658,7 +670,8 @@ function onDetection(result,cost,capturedAt,generation){
   const now=performance.now();
   if(now-(state.lastStatsUpdate||0)>1200){
     $('performance-status').textContent='Распознавание: '+Math.round(state.inferCost)+
-      ' мс · задержка обработки ≈'+Math.round(state.frameAge)+' мс · '+state.delegate;
+      ' мс · задержка обработки ≈'+Math.round(state.frameAge)+' мс · '+state.delegate+
+      (state.workerFailureReason?' · причина worker: '+state.workerFailureReason:'');
     state.lastStatsUpdate=now;
   }
 }
