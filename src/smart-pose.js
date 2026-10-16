@@ -59,8 +59,8 @@ export function reconstructMiddle(a,c,reference,lenA,lenB){
   return result.every(Number.isFinite)?{x:result[0],y:result[1],z:result[2]}:null;
 }
 export function stabilizePoseLandmarks(tracker,landmarks,now,threshold=.4,{
-  maxOcclusionMs:420,
-  lengthTolerance:.46
+  maxOcclusionMs=420,
+  lengthTolerance=.46
 }={}){
   if(!Array.isArray(landmarks) || !tracker){
     return {landmarks,recovered:0,rejected:0};
