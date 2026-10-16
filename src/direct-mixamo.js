@@ -34,7 +34,15 @@ export function createDirectMixamoDriver(mapping){
     });
   }
   const byKey=new Map(joints.map(j=>[j.key,j]));
-  return {joints,byKey};
+  // Match the model's shoulder axis rather than assuming every exported
+  // avatar faces +Z. This compensates for 180-degree Mixamo GLB orientation.
+  const left=byKey.get('leftarm')?.bone,right=byKey.get('rightarm')?.bone;
+  const axis=left&&right?
+    left.getWorldPosition(new THREE.Vector3()).sub(right.getWorldPosition(new THREE.Vector3())):null;
+  if(axis)axis.y=0;
+  const yaw=axis?.lengthSq()>1e-8 ? -Math.atan2(axis.z,axis.x) : 0;
+  const orientation=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),yaw);
+  return {joints,byKey,orientation};
 }
 export function fitMixamoDirections(driver,directions,now=0,{smoothing=.78,missingMs=550}={}){
   if(!driver)return 0;
@@ -60,7 +68,7 @@ export function fitMixamoDirections(driver,directions,now=0,{smoothing=.78,missi
     j.lastSeen=now;
     j.bone.parent.updateWorldMatrix(true,false);
     const parentWorld=j.bone.parent.getWorldQuaternion(new THREE.Quaternion());
-    const localDesired=desired.clone().applyQuaternion(parentWorld.invert()).normalize();
+    const localDesired=desired.clone().applyQuaternion(driver.orientation).applyQuaternion(parentWorld.invert()).normalize();
     const restDirection=j.childReference.clone().applyQuaternion(j.rest).normalize();
     // Preserve the actual GLB bone roll. The shortest swing from REST
     // direction to the detected limb direction has no arbitrary axial twist.
