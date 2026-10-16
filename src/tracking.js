@@ -34,15 +34,19 @@ export function deriveDirections(landmarks,minVisibility=.4,xSign=1){
  const horizontal=a=>a?[a[0],a[2]]:null;
  const usable=a=>a&&Math.hypot(...a)>.075;
  const sa=horizontal(shoulderAxis),ha=horizontal(hipAxis);
- if(usable(sa)||usable(ha)){
-   let axis=usable(sa)?sa:ha;
-   // Hips help when they agree with shoulders but cannot override a
-   // clearly detected shoulder rotation with unrelated occlusion noise.
-   if(usable(sa)&&usable(ha)){
-     const dot=(sa[0]*ha[0]+sa[1]*ha[1])/(Math.hypot(...sa)*Math.hypot(...ha));
-     if(dot>.55)axis=[sa[0]*.8+ha[0]*.2,sa[1]*.8+ha[1]*.2];
+ // A shoulder-only yaw is easily fooled by camera depth noise when the
+ // actor turns just the head or hides one shoulder behind the face. Only
+ // turn the whole avatar if pelvis AND shoulders indicate the SAME heading.
+ // The pelvis dominates the estimate; unrelated shoulder motion is ignored.
+ if(usable(sa)&&usable(ha)){
+   const dot=(sa[0]*ha[0]+sa[1]*ha[1])/(Math.hypot(...sa)*Math.hypot(...ha));
+   if(dot>.82){
+     const unit=(v)=>[v[0]/Math.hypot(...v),v[1]/Math.hypot(...v)];
+     const shoulderUnit=unit(sa),hipUnit=unit(ha);
+     const axis=[shoulderUnit[0]*.22+hipUnit[0]*.78,
+       shoulderUnit[1]*.22+hipUnit[1]*.78];
+     out.BodyYaw=Math.atan2(axis[1],axis[0]);
    }
-   out.BodyYaw=Math.atan2(axis[1],axis[0]);
  }
  if(shoulder&&hips){out.Spine1=diff(hips,shoulder);out.Spine2=diff(hips,shoulder);}
  if(ls&&rs){out.LeftShoulder=diff(shoulder,ls);out.RightShoulder=diff(shoulder,rs);}

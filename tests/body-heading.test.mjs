@@ -48,3 +48,29 @@ test('shortest yaw avoids a full spin across 180-degree wrap',()=>{
  assert.ok(Math.abs(shortestHeadingDelta(state.offset,nearBack))<.5);
  resetHeading(state);assert.equal(state.offset,0);assert.equal(state.reference,null);
 });
+
+test('rotating only head does NOT produce whole-avatar heading changes',()=>{
+ const {p,set}=subject(.34,0);
+ // Face markers rotate relative to otherwise stationary shoulders/hips.
+ set(7,.66,.19,-.13);set(8,.37,.19,.12);set(0,.69,.18,.02);
+ const first=deriveDirections(p,.4,1);
+ assert.ok(first.Head?.every(Number.isFinite));
+ set(7,.49,.19,-.20);set(8,.48,.19,.20);set(0,.49,.18,-.13);
+ const headTurn=deriveDirections(p,.4,1);
+ assert.ok(headTurn.Head?.every(Number.isFinite));
+ assert.equal(headTurn.BodyYaw,first.BodyYaw);
+});
+test('fake shoulder depth rotation with stable hips does not spin the entire actor',()=>{
+ const {p,set}=subject(.34,0);
+ assert.ok(Number.isFinite(deriveDirections(p,.4).BodyYaw));
+ // Bad shoulder depth: two shoulders suddenly appear side-on while the
+ // pelvis remains completely frontal. The conservative solver should hold.
+ set(11,.5,.28,-.16);set(12,.5,.28,.16);
+ const bad=deriveDirections(p,.4,1);
+ assert.equal(bad.BodyYaw,undefined);
+});
+test('head and one visible shoulder without pelvis do not calibrate yaw',()=>{
+ const {p}=subject();
+ p[23].visibility=.01;p[24].visibility=.01;
+ assert.equal(deriveDirections(p,.4,1).BodyYaw,undefined);
+});
