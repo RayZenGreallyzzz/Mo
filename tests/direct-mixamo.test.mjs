@@ -148,7 +148,7 @@ test('raising only LEFT leg preserves RIGHT Mixamo hip/knee rest rotations',()=>
   LeftLeg:[0,-1,0],RightLeg:[0,-1,0]
  };
  fitMixamoDirections(driver,standing,1000);
- fitMixamoDirections(driver,{...standing(),
+ fitMixamoDirections(driver,{...standing,
     LeftUpLeg:[.1,-.55,.9],LeftLeg:[.2,-.8,.5],
     RightUpLeg:[.08,-.996,.01],RightLeg:[.05,-.999,0]},1100);
  assert.ok(target.leftLeg.upper.quaternion.angleTo(new THREE.Quaternion())>.2);
@@ -163,7 +163,7 @@ test('raising only RIGHT leg preserves LEFT Mixamo hip/knee rest rotations',()=>
   LeftLeg:[0,-1,0],RightLeg:[0,-1,0]
  };
  fitMixamoDirections(driver,standing,1000);
- fitMixamoDirections(driver,{...standing(),
+ fitMixamoDirections(driver,{...standing,
     RightUpLeg:[-.12,-.40,.91],RightLeg:[-.1,-.7,.65]},1100);
  assert.ok(target.rightLeg.upper.quaternion.angleTo(new THREE.Quaternion())>.2);
  assert.ok(target.leftLeg.upper.quaternion.angleTo(new THREE.Quaternion())<1e-6);
