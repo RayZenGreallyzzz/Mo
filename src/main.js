@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { buildRetargetMap, retargetPose, retargetTrack } from './character.js';
+import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } from './character.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
@@ -30,6 +30,14 @@ const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  lastCapture:0,smoothed:0.12,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false,
  character:null,loadingCharacter:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0};
 let poseWorker=null,workerReady=false,workerBusy=false,workerDisabled=false,workerTimer=null;
+const boneLastSeen=new Map();
+function relaxStaleBones(now=performance.now()){
+ for(const name of trackedNames){
+  const bone=joints[name.slice(9)];
+  if(bone && now-(boneLastSeen.get(name)||0)>700)
+   bone.quaternion.slerp(rest.get(bone.name),.12);
+ }
+}
 let toastTimer;
 function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),4500);}
 function status(message){$('source-status').textContent=message;}
@@ -240,7 +248,9 @@ function orientBone(bone,relativeDirection,smoothing){
     bone.name.endsWith('RightHand')?new THREE.Vector3(-1,0,0):null);
  if(!reference||reference.lengthSq()<1e-7)return;
  workingQ.setFromUnitVectors(reference.clone().normalize(),tempV.normalize());
- bone.quaternion.slerp(workingQ,Math.min(1,Math.max(.05,smoothing)));
+// Bad landmarks must never force a joint into a dangerous 180-degree pose.
+ const safe=clampJointQuaternion(bone.name,rest.get(bone.name),workingQ);
+ bone.quaternion.slerp(safe,Math.min(1,Math.max(.05,smoothing)));
 }
 // MediaPipe's semantic LEFT and RIGHT landmark indexes are never swapped.
 // The checkbox is presentation only (CSS); it never changes these coordinates.
@@ -255,7 +265,10 @@ function valid(landmarks,index){
 const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
 function applyPose(data){
  const landmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
- if(!landmarks)return false;
+ if(!landmarks){
+  relaxStaleBones();rigRoot.updateMatrixWorld(true);syncCharacter();
+  return false;
+ }
  if(!state.handednessReady){
   const sign=trackingSign(landmarks,state.visibility);
   if(sign){state.worldXSign=sign;state.handednessReady=true;}
@@ -266,6 +279,7 @@ function applyPose(data){
  const move=(name,scale=1)=>{
   const target=dirs[name];
   if(!target||!joints[name])return;
+  boneLastSeen.set(name,performance.now());
   orientBone(joints[name],mpPoint(target),strength*scale);changed=true;
  };
  // The body follows pelvis and shoulders; arms and legs use their OWN
@@ -286,9 +300,13 @@ function applyPose(data){
  if(head){
   const target=new THREE.Euler(head[0],head[1],head[2],'XYZ');
   workingQ.setFromEuler(target);
-  joints.Head.quaternion.slerp(workingQ,Math.min(1,strength*.9));
+  joints.Head.quaternion.slerp(
+   clampJointQuaternion('Head',rest.get(joints.Head.name),workingQ),
+   Math.min(1,strength*.9));
+  boneLastSeen.set('Head',performance.now());
   changed=true;
  }
+ relaxStaleBones();
  rigRoot.updateMatrixWorld(true);
  syncCharacter();
  state.lastResult=data?.landmarks?.length?data:state.lastResult;
@@ -512,7 +530,7 @@ async function ensureLandmarker(){
   }
 }
 async function stopSource({keepPose=false}={}){
- state.source=false;state.sourceGeneration++;state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
+ state.source=false;state.sourceGeneration++;boneLastSeen.clear();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
  if(state.stream){for(const t of state.stream.getTracks())t.stop();state.stream=null;}
