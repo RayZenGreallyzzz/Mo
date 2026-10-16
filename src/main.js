@@ -27,13 +27,14 @@ const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  processing:false,recording:false,reviewMode:false,frames:[],startTime:0,recordedDuration:0,
  playback:false,playbackStart:0,lastInfer:0,lastVideoTime:-1,
  lastCapture:0,smoothed:0.12,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false,
- character:null,loadingCharacter:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0};
+ character:null,loadingCharacter:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0};
+let poseWorker=null,workerReady=false,workerBusy=false,workerDisabled=false,workerTimer=null;
 let toastTimer;
 function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),4500);}
 function status(message){$('source-status').textContent=message;}
 function showEngine(message,ok=false){$('engine-chip').textContent=(ok?'✓ ':'● ')+message;$('engine-chip').style.color=ok?'#6cf0bd':'#f5d895';}
 function setControls(){
- const usable=state.source && (state.mode==='demo'||!!state.pose);
+ const usable=state.source && (state.mode==='demo'||workerReady||!!state.pose);
  $('record').disabled=!usable||state.recording||state.playback;
  $('finish').disabled=!state.recording;
  $('play-capture').disabled=state.recording||state.frames.length<2;
@@ -60,7 +61,7 @@ renderer.setClearColor('#0b1524');renderer.outputColorSpace=THREE.SRGBColorSpace
 stage.append(renderer.domElement);
 const orbit=new OrbitControls(camera,renderer.domElement);
 orbit.enableDamping=true;orbit.dampingFactor=.07;orbit.minDistance=1.5;orbit.maxDistance=10;
-function resetView(){camera.position.set(2.6,1.8,4.8);orbit.target.set(0,1.45,0);orbit.update();}
+function resetView(){camera.position.set(0,1.7,4.6);orbit.target.set(0,1.45,0);orbit.update();}
 resetView();$('reset-view').addEventListener('click',resetView);
 scene.add(new THREE.HemisphereLight(0x9cd8ff,0x131831,2.0));
 const keyLight=new THREE.DirectionalLight(0xb6f5ff,3);keyLight.position.set(3,5,4);scene.add(keyLight);
@@ -422,7 +423,7 @@ function renderLandmarks(pose){
  const scale=Math.min(w/video.videoWidth,h/video.videoHeight);
  const rw=video.videoWidth*scale,rh=video.videoHeight*scale,ox=(w-rw)/2,oy=(h-rh)/2;
  function pos(i){const p=points[i];return [ox+p.x*rw,oy+p.y*rh];}
- ctx.lineWidth=Math.max(2,Math.min(4,w/200));ctx.strokeStyle='#60ecf6';ctx.shadowBlur=9;ctx.shadowColor='#00e8e4';
+ ctx.lineWidth=Math.max(2,Math.min(4,w/200));ctx.strokeStyle='#60ecf6';ctx.shadowBlur=0;
  for(const [a,b] of pairs){
   if(!valid(points,a)||!valid(points,b))continue;
   const p=pos(a),q=pos(b);ctx.beginPath();ctx.moveTo(...p);ctx.lineTo(...q);ctx.stroke();
@@ -432,25 +433,80 @@ function renderLandmarks(pose){
   if(!valid(points,i))continue;const p=pos(i);ctx.beginPath();ctx.arc(...p,i===15||i===16?5:4,0,Math.PI*2);ctx.fillStyle='#b6ffff';ctx.fill();
  }
 }
+function shutdownWorker(){
+  if(workerTimer){clearTimeout(workerTimer);workerTimer=null;}
+  poseWorker?.terminate();poseWorker=null;workerReady=false;workerBusy=false;
+}
+function recoverWorker(reason){
+  if(!workerReady)return;
+  console.warn('Worker pose failure, trying compatible foreground engine:',reason);
+  shutdownWorker();workerDisabled=true;state.processing=false;
+  showEngine('Фоновый захват недоступен · переключаемся');
+  ensureLandmarker().then(setControls).catch(error=>{
+    status('Ошибка распознавания: '+(error?.message||error));
+  });
+}
 async function ensureLandmarker(){
- if(state.pose)return state.pose;
- showEngine('Загрузка MediaPipe и модели…');
- try{
-  const { FilesetResolver,PoseLandmarker }=await import('@mediapipe/tasks-vision');
-  const vision=await FilesetResolver.forVisionTasks(WASM_URL);
-  const options=delegate=>({baseOptions:{modelAssetPath:MODEL_URL,delegate},runningMode:'VIDEO',
-   numPoses:1,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.45});
-  // GPU first (faster on compatible tablets). Graceful CPU fallback on
-  // devices without working WebGL / MediaPipe GPU delegation.
-  try{state.pose=await PoseLandmarker.createFromOptions(vision,options('GPU'));state.delegate='GPU';}
-  catch(gpuError){console.warn('GPU not available, using CPU',gpuError);
-   state.pose=await PoseLandmarker.createFromOptions(vision,options('CPU'));state.delegate='CPU';}
-  showEngine('MediaPipe '+state.delegate+' · локальное распознавание',true);return state.pose;
- }catch(e){showEngine('Не удалось загрузить MediaPipe');
-  throw new Error('Ошибка локальной модели MediaPipe: '+(e?.message||e));}
+  if(workerReady||state.pose)return true;
+  showEngine('Загружаем локальную модель захвата…');
+  // Prefer a CPU Web Worker: synchronous MediaPipe cannot pause the UI or
+  // 3D renderer. Older Android WebViews fall back to the previous path.
+  if(!workerDisabled&&typeof Worker!=='undefined'&&typeof createImageBitmap==='function'){
+    let candidate;
+    try{
+      candidate=new Worker(new URL('./pose-worker.js',import.meta.url),{type:'module'});
+      await new Promise((resolve,reject)=>{
+        let done=false;
+        const timeout=setTimeout(()=>{done=true;reject(new Error('Фоновая модель не ответила'))},12000);
+        const finish=(error)=>{
+          if(done)return;
+          done=true;clearTimeout(timeout);
+          if(error)reject(error);else resolve();
+        };
+        candidate.onmessage=({data})=>{
+          if(data?.type==='ready')finish();
+          else if(data?.type==='error')finish(new Error(data.message||'Worker error'));
+        };
+        candidate.onerror=e=>finish(new Error(e.message||'Worker initialization error'));
+        candidate.postMessage({type:'init',wasmUrl:WASM_URL,modelUrl:MODEL_URL});
+      });
+      poseWorker=candidate;workerReady=true;workerBusy=false;state.delegate='CPU · worker';
+      candidate.onmessage=({data})=>{
+        if(data?.type==='result'){
+          if(workerTimer){clearTimeout(workerTimer);workerTimer=null;}
+          workerBusy=false;
+          onDetection(data.result,data.inferenceMs,data.capturedAt,data.generation);
+        }else if(data?.type==='error')recoverWorker(data.message);
+      };
+      candidate.onerror=e=>recoverWorker(e.message||'Worker error');
+      showEngine('MediaPipe · фоновый поток (3D не блокируется)',true);
+      return true;
+    }catch(error){
+      candidate?.terminate();workerDisabled=true;
+      console.warn('Worker not available on this WebView:',error);
+    }
+  }
+  // Compatible fallback, still processing only unique video frames.
+  try{
+    const {FilesetResolver,PoseLandmarker}=await import('@mediapipe/tasks-vision');
+    const vision=await FilesetResolver.forVisionTasks(WASM_URL);
+    const options=delegate=>({baseOptions:{modelAssetPath:MODEL_URL,delegate},runningMode:'VIDEO',
+      numPoses:1,minPoseDetectionConfidence:.45,minPosePresenceConfidence:.45,minTrackingConfidence:.45});
+    try{state.pose=await PoseLandmarker.createFromOptions(vision,options('GPU'));state.delegate='GPU · основной поток';}
+    catch(gpuError){
+      console.warn('GPU not available, using CPU:',gpuError);
+      state.pose=await PoseLandmarker.createFromOptions(vision,options('CPU'));
+      state.delegate='CPU · основной поток';
+    }
+    showEngine('MediaPipe '+state.delegate,true);
+    return true;
+  }catch(error){
+    showEngine('Не удалось загрузить MediaPipe');
+    throw new Error('Ошибка локальной модели MediaPipe: '+(error?.message||error));
+  }
 }
 async function stopSource({keepPose=false}={}){
- state.source=false;state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
+ state.source=false;state.sourceGeneration++;state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
  if(state.stream){for(const t of state.stream.getTracks())t.stop();state.stream=null;}
@@ -509,28 +565,52 @@ for(const tab of document.querySelectorAll('.mode'))tab.addEventListener('click'
  $('source-note').textContent=next==='demo'?'Демо работает полностью локально — без интернета и камеры.':next==='video'?'Видео обрабатывается в браузере. Никакой отправки ролика на сервер нет.':'Камера работает внутри APK или на HTTPS-сайте. Распознавание происходит на устройстве.';
  setControls();
 });
-function infer(now){
- if(!state.pose||!state.source||video.readyState<2||video.paused||state.playback)return;
- // Old 100 ms throttle capped pose tracking at ~10 FPS even on fast devices.
- // Aim at ~24 FPS; real throughput adapts to the detector's measured cost.
- const interval=Math.max(32,Math.min(100,state.inferCost*1.10));
- if(now-state.lastInfer<interval||state.lastVideoTime===video.currentTime)return;
- state.lastInfer=now;state.lastVideoTime=video.currentTime;
- try{
-  const began=performance.now();
-  const result=state.pose.detectForVideo(video,now);
-  const cost=performance.now()-began;
-  state.inferCost=state.inferCost?state.inferCost*.85+cost*.15:cost;
-  state.lastInfer=began;
-  const found=applyPose(result);renderLandmarks(result);
+function onDetection(result,cost,capturedAt,generation){
+  // A camera or video may have been replaced while an old worker frame
+  // was in flight. Never apply stale results or put them into a new clip.
+  if(generation!==state.sourceGeneration||!state.source||state.playback||state.reviewMode)return;
+  state.inferCost=state.inferCost?state.inferCost*.8+cost*.2:cost;
+  state.frameAge=Math.max(0,performance.now()-capturedAt);
+  const found=applyPose(result);
+  renderLandmarks(result);
   $('pose-label').textContent=found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ';
   $('live-status').innerHTML='<span class="green-dot"></span> '+(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ');
-  if(state.recording&&found&&now-state.lastCapture>=33){snapshot((now-state.startTime)/1000);state.lastCapture=now;}
-  if(now-(state.lastStatsUpdate||0)>1400){
-   $('performance-status').textContent='Распознавание: '+Math.round(state.inferCost)+' мс · '+state.delegate;
-   state.lastStatsUpdate=now;
+  if(state.recording&&found&&capturedAt>=state.startTime&&capturedAt-state.lastCapture>=33){
+    snapshot((capturedAt-state.startTime)/1000);state.lastCapture=capturedAt;
   }
- }catch(e){console.warn('Pose detection issue:',e);status('Ошибка кадра распознавания');}
+  const now=performance.now();
+  if(now-(state.lastStatsUpdate||0)>1200){
+    $('performance-status').textContent='Распознавание: '+Math.round(state.inferCost)+
+      ' мс · задержка обработки ≈'+Math.round(state.frameAge)+' мс · '+state.delegate;
+    state.lastStatsUpdate=now;
+  }
+}
+function infer(now){
+  if(!(workerReady||state.pose)||!state.source||video.readyState<2||video.paused||state.playback)return;
+  // Never accumulate a queue of old camera frames: at most one bitmap is
+  // captured/processed at a time, then the next available fresh frame.
+  const interval=Math.max(33,Math.min(140,(state.inferCost||33)*.95));
+  if(now-state.lastInfer<interval||state.lastVideoTime===video.currentTime||workerBusy)return;
+  state.lastInfer=now;state.lastVideoTime=video.currentTime;
+  const generation=state.sourceGeneration;
+  if(workerReady&&poseWorker){
+    workerBusy=true;
+    createImageBitmap(video).then(bitmap=>{
+      if(!workerReady||!poseWorker||generation!==state.sourceGeneration||!state.source){
+        bitmap.close();workerBusy=false;return;
+      }
+      try{
+        poseWorker.postMessage({type:'detect',bitmap,timestamp:now,capturedAt:now,generation},[bitmap]);
+        workerTimer=setTimeout(()=>recoverWorker('Распознавание не отвечает'),2500);
+      }catch(error){bitmap.close();workerBusy=false;recoverWorker(error);}
+    }).catch(error=>{workerBusy=false;recoverWorker(error);});
+    return;
+  }
+  try{
+    const began=performance.now();
+    const result=state.pose.detectForVideo(video,now);
+    onDetection(result,performance.now()-began,began,generation);
+  }catch(error){console.warn('Pose detection issue:',error);status('Ошибка кадра распознавания');}
 }
 const timer=new THREE.Clock();
 function animate(){
