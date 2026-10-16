@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { buildRetargetMap, retargetPose, retargetTrack } from './character.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
+import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 
@@ -440,7 +441,8 @@ function shutdownWorker(){
 function recoverWorker(reason){
   if(!workerReady)return;
   console.warn('Worker pose failure, trying compatible foreground engine:',reason);
-  shutdownWorker();workerDisabled=true;state.processing=false;
+  shutdownWorker();workerDisabled=true;state.processing=false;state.inferCost=0;
+  state.lastInfer=0;state.lastVideoTime=-1;
   showEngine('Фоновый захват недоступен · переключаемся');
   ensureLandmarker().then(setControls).catch(error=>{
     status('Ошибка распознавания: '+(error?.message||error));
@@ -568,7 +570,8 @@ for(const tab of document.querySelectorAll('.mode'))tab.addEventListener('click'
 function onDetection(result,cost,capturedAt,generation){
   // A camera or video may have been replaced while an old worker frame
   // was in flight. Never apply stale results or put them into a new clip.
-  if(generation!==state.sourceGeneration||!state.source||state.playback||state.reviewMode)return;
+  if(!shouldApplyResult({generation,currentGeneration:state.sourceGeneration,
+    active:state.source,playback:state.playback,review:state.reviewMode}))return;
   state.inferCost=state.inferCost?state.inferCost*.8+cost*.2:cost;
   state.frameAge=Math.max(0,performance.now()-capturedAt);
   const found=applyPose(result);
@@ -589,8 +592,8 @@ function infer(now){
   if(!(workerReady||state.pose)||!state.source||video.readyState<2||video.paused||state.playback)return;
   // Never accumulate a queue of old camera frames: at most one bitmap is
   // captured/processed at a time, then the next available fresh frame.
-  const interval=Math.max(33,Math.min(140,(state.inferCost||33)*.95));
-  if(now-state.lastInfer<interval||state.lastVideoTime===video.currentTime||workerBusy)return;
+  if(!shouldSampleFrame({now,lastInfer:state.lastInfer,lastVideoTime:state.lastVideoTime,
+    videoTime:video.currentTime,busy:workerBusy,inferenceMs:state.inferCost}))return;
   state.lastInfer=now;state.lastVideoTime=video.currentTime;
   const generation=state.sourceGeneration;
   if(workerReady&&poseWorker){
@@ -603,7 +606,10 @@ function infer(now){
         poseWorker.postMessage({type:'detect',bitmap,timestamp:now,capturedAt:now,generation},[bitmap]);
         workerTimer=setTimeout(()=>recoverWorker('Распознавание не отвечает'),2500);
       }catch(error){bitmap.close();workerBusy=false;recoverWorker(error);}
-    }).catch(error=>{workerBusy=false;recoverWorker(error);});
+    }).catch(error=>{
+      workerBusy=false;
+      if(generation===state.sourceGeneration&&state.source)recoverWorker(error);
+    });
     return;
   }
   try{
