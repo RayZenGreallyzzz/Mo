@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import {boneKey, clampJointQuaternion} from './character.js';
+import {createLegStability,resetLegStability,classifyLegActivity} from './leg-stability.js';
 
 // Stable, direct fitting for existing Mixamo-compatible SkinnedMesh rigs.
 // Unlike mannequin rotation retargeting, use the imported model's OWN bone
@@ -42,7 +43,8 @@ export function createDirectMixamoDriver(mapping){
   const yaw=axis?.lengthSq()>1e-8 ? -Math.atan2(axis.z,axis.x) : 0;
   const orientation=new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0),yaw);
   return {joints,byKey,orientation,calibration:{torso:null,head:null},
-    torsoLastSeen:-Infinity,headLastSeen:-Infinity};
+    torsoLastSeen:-Infinity,headLastSeen:-Infinity,
+    legStability:createLegStability()};
 }
 // Calibrate separately for each loaded character and camera source.
 // First reliably visible upright body becomes the zero-pose reference.
@@ -51,6 +53,7 @@ export function resetDirectMixamoCalibration(driver){
   driver.calibration={torso:null,head:null};
   driver.torsoLastSeen=-Infinity;
   driver.headLastSeen=-Infinity;
+  resetLegStability(driver.legStability);
   for(const joint of driver.joints){
     joint.lastSeen=-Infinity;
     joint.bone.quaternion.copy(joint.rest);
@@ -122,6 +125,7 @@ export function fitMixamoDirections(driver,directions,now=0,{smoothing=.78,missi
     }
   }
   updateTrunk(driver,directions,now,alpha,missingMs);
+  const legActivity=classifyLegActivity(driver.legStability,directions);
   // Let the clavicle follow a punch slightly before solving the elbow.
   // This is a *small* swing (at most 12 degrees), not an arbitrary
   // shoulder roll or the large torso twist that used to collapse meshes.
@@ -146,6 +150,13 @@ export function fitMixamoDirections(driver,directions,now=0,{smoothing=.78,missi
   }
   for(const j of driver.joints){
     if(!DRIVEN.has(j.key))continue;
+    // A leg at rest is not re-solved against noisy camera depth on
+    // every frame. Do not drag the support leg up during a one-leg kick.
+    if((j.key==='leftupleg'||j.key==='leftleg')&&legActivity.lockLeft ||
+       (j.key==='rightupleg'||j.key==='rightleg')&&legActivity.lockRight){
+      j.bone.quaternion.slerp(j.rest,.24);
+      continue;
+    }
     const desired=directionOf(directions?.[j.sourceName.slice(9)]);
     if(!desired || !j.childReference){
       // Invalid or occluded landmarks must not drag OTHER bones.
