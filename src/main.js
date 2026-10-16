@@ -28,7 +28,7 @@ const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  processing:false,recording:false,reviewMode:false,frames:[],startTime:0,recordedDuration:0,
  playback:false,playbackStart:0,lastInfer:0,lastVideoTime:-1,
  lastCapture:0,smoothed:0.12,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false,
- character:null,loadingCharacter:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0};
+ character:null,loadingCharacter:false,poseFrozen:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0};
 let poseWorker=null,workerReady=false,workerBusy=false,workerDisabled=false,workerTimer=null;
 const boneLastSeen=new Map();
 function relaxStaleBones(now=performance.now()){
@@ -44,7 +44,7 @@ function status(message){$('source-status').textContent=message;}
 function showEngine(message,ok=false){$('engine-chip').textContent=(ok?'✓ ':'● ')+message;$('engine-chip').style.color=ok?'#6cf0bd':'#f5d895';}
 function setControls(){
  const usable=state.source && (state.mode==='demo'||workerReady||!!state.pose);
- $('record').disabled=!usable||state.recording||state.playback;
+ $('record').disabled=!usable||state.recording||state.playback||state.poseFrozen;
  $('finish').disabled=!state.recording;
  $('play-capture').disabled=state.recording||state.frames.length<2;
  $('clear').disabled=state.recording||!state.frames.length;
@@ -60,6 +60,8 @@ function setControls(){
  $('rec-label').hidden=!state.recording;
  $('load-character').disabled=state.loadingCharacter||state.recording;
  $('reset-character').disabled=!state.character||state.loadingCharacter||state.recording;
+ $('reset-pose').disabled=state.loadingCharacter||state.recording;
+ $('reset-pose').textContent=state.poseFrozen?'▶ Продолжить захват':'↺ Сбросить позу';
 }
 const scene=new THREE.Scene();scene.background=new THREE.Color('#0b1524');
 const camera=new THREE.PerspectiveCamera(37,1,0.01,100);
@@ -184,6 +186,19 @@ function detachCharacter(){
  setControls();
 }
 $('load-character').addEventListener('click',()=>$('character-file').click());
+$('reset-pose').addEventListener('click',()=>{
+ if(state.recording)return;
+ if(state.poseFrozen){
+  state.poseFrozen=false;boneLastSeen.clear();
+  toast('Захват движений возобновлён');
+ }else{
+  // Freeze new camera rotations so the original GLB can be inspected.
+  state.poseFrozen=true;neutral();resetCustomPose();boneLastSeen.clear();
+  rigRoot.updateMatrixWorld(true);syncCharacter();
+  toast('Поза сброшена, модель сохранена. Нажми «Продолжить захват».');
+ }
+ setControls();
+});
 $('reset-character').addEventListener('click',()=>{
  if(state.frames.length>1&&!window.confirm('Вернуться к манекену? Старая запись будет очищена.'))return;
  state.playback=false;state.reviewMode=false;state.frames=[];
@@ -342,7 +357,7 @@ function formatTime(s){const m=Math.floor(s/60),sec=Math.floor(s%60),tenths=Math
 function startRecording(){
  if(!state.source)return toast('Сначала включи камеру, видео или демо');
  state.playback=false;state.reviewMode=false;state.frames=[];state.recordedDuration=0;
- state.recording=true;state.startTime=performance.now();state.lastCapture=-1;
+ state.recording=true;state.poseFrozen=false;state.startTime=performance.now();state.lastCapture=-1;
  if(state.mode==='video'&&$('video').paused){$('video').play().catch(()=>{});}
  snapshot(0);setControls();$('timer').textContent='00:00.0';$('timeline-label').textContent='Идёт запись…';
  toast('Запись началась — двигай руками, ногами и головой!');
@@ -530,7 +545,7 @@ async function ensureLandmarker(){
   }
 }
 async function stopSource({keepPose=false}={}){
- state.source=false;state.sourceGeneration++;boneLastSeen.clear();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
+ state.source=false;state.sourceGeneration++;state.poseFrozen=false;boneLastSeen.clear();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
  if(state.stream){for(const t of state.stream.getTracks())t.stop();state.stream=null;}
@@ -603,7 +618,7 @@ function onDetection(result,cost,capturedAt,generation){
     active:state.source,playback:state.playback,review:state.reviewMode}))return;
   state.inferCost=state.inferCost?state.inferCost*.8+cost*.2:cost;
   state.frameAge=Math.max(0,performance.now()-capturedAt);
-  const found=applyPose(result);
+  const found=state.poseFrozen?false:applyPose(result);
   renderLandmarks(result);
   $('pose-label').textContent=found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ';
   $('live-status').innerHTML='<span class="green-dot"></span> '+(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ');
@@ -659,7 +674,7 @@ function animate(){
  }else if(state.reviewMode){
   // Do not let the live camera/demo override the recorded pose while reviewing.
  }else if(state.source&&state.mode==='demo'){
-  if(!state.recording || now-state.lastCapture>=64){
+  if(!state.poseFrozen&&(!state.recording || now-state.lastCapture>=64)){
    applyDemo((now-state.demoStart)/1000);
    if(state.recording){snapshot((now-state.startTime)/1000);state.lastCapture=now;}
   }
