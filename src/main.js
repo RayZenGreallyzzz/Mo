@@ -620,8 +620,8 @@ function onDetection(result,cost,capturedAt,generation){
   state.frameAge=Math.max(0,performance.now()-capturedAt);
   const found=state.poseFrozen?false:applyPose(result);
   renderLandmarks(result);
-  $('pose-label').textContent=found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ';
-  $('live-status').innerHTML='<span class="green-dot"></span> '+(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ');
+  $('pose-label').textContent=state.poseFrozen?'Ⅱ ПАУЗА ПОЗЫ':(found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ');
+  $('live-status').innerHTML='<span class="green-dot"></span> '+(state.poseFrozen?'ПАУЗА':(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ'));
   if(state.recording&&found&&capturedAt>=state.startTime&&capturedAt-state.lastCapture>=33){
     snapshot((capturedAt-state.startTime)/1000);state.lastCapture=capturedAt;
   }
