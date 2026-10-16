@@ -17,3 +17,10 @@ test('offline MediaPipe, 3D preview, GLB export and Android share exist',()=>{
  assert.match(js,/startRecording/);
  assert.match(html,/id="start-camera"/);
 });
+
+test('overlay visibility guard exists and handles lost landmarks independently',()=>{
+ assert.match(js,/function valid\(landmarks,index\)/);
+ assert.match(js,/if\(!valid\(points,a\)\|\|!valid\(points,b\)\)continue/);
+ assert.match(js,/deriveDirections\(landmarks,state.visibility,state.worldXSign\)/);
+ assert.ok(!js.includes('mirror ? -1 : 1'));
+});
