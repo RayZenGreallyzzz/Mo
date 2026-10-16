@@ -58,8 +58,16 @@
     <div class="source-note" id="source-note">В APK камера работает после разрешения Android. В браузере нужен HTTPS или localhost.</div>
    </article>
    <article class="panel model-panel">
-    <div class="panel-head"><div><span class="panel-no">02</span> 3D-МАНЕКЕН</div><div class="live-status" id="live-status"><span class="green-dot"></span> ГОТОВ</div></div>
+    <div class="panel-head"><div><span class="panel-no">02</span> 3D-ПЕРСОНАЖ</div><div class="live-status" id="live-status"><span class="green-dot"></span> ГОТОВ</div></div>
     <div class="model-stage" id="model-stage"><div class="grid-floor"></div><span class="axis-guide">3D · ВРАЩАЙ ПАЛЬЦЕМ</span></div>
+    <div class="character-controls">
+     <div><strong id="character-name">Стандартный манекен</strong><p id="character-status">Можешь загрузить свой GLB с готовым скелетом.</p></div>
+     <div class="character-buttons">
+       <button type="button" id="load-character" class="btn btn-primary">＋ Загрузить GLB</button>
+       <button type="button" id="reset-character" class="btn btn-ghost" disabled>↺ Манекен</button>
+       <input type="file" id="character-file" accept=".glb,model/gltf-binary" hidden/>
+     </div>
+    </div>
     <div class="model-footer"><span>◈ Поворачивай модель пальцем / мышью</span><button type="button" id="reset-view" class="tiny-button">⟲ Сбросить вид</button></div>
    </article>
   </section>
@@ -67,7 +75,7 @@
    <div class="panel-head"><div><span class="panel-no">03</span> ЗАПИСЬ АНИМАЦИИ</div><span id="frame-count" class="mini-status">0 кадров</span></div>
    <div class="controls-grid">
     <div class="field"><label for="clip-name">Название движения</label><input id="clip-name" maxlength="64" value="Махание рукой" /></div>
-    <div class="field"><label for="smooth">Сглаживание <b id="smooth-value">45%</b></label><input id="smooth" type="range" min="0" max="95" value="45" /></div>
+    <div class="field"><label for="smooth">Сглаживание <b id="smooth-value">12%</b></label><input id="smooth" type="range" min="0" max="95" value="12" /></div>
     <div class="field"><label for="confidence">Минимальная видимость <b id="confidence-value">40%</b></label><input id="confidence" type="range" min="15" max="85" value="40" /></div>
     <div class="field check-field"><label class="checkbox-label"><input type="checkbox" id="mirror" checked/> Отразить камеру как зеркало</label><small>Только картинка — 3D-скелет и запись всегда без зеркального дублирования.</small></div>
    </div>
@@ -80,11 +88,11 @@
    </div>
    <div class="scrubber"><input type="range" id="timeline" min="0" max="100" value="0" disabled aria-label="Просмотр записанной анимации"/><div class="scrub-label"><span>НАЧАЛО</span><span id="timeline-label">Нет записи</span><span>КОНЕЦ</span></div></div>
    <div class="export-bar">
-    <div><strong>Готово для Animation Studio</strong><p>Сохраняем движения головы, рук, корпуса, таза, ног и стоп. Каждая сторона отслеживается отдельно. До обработки видео результат нужно проверить.</p></div>
+    <div><strong>Готово для Animation Studio</strong><p>Сохраняем анимацию всего тела. Загрузив свой GLB со скелетом, можно записывать движения на нём и экспортировать модель вместе с анимацией. Для необычных скелетов может потребоваться ручная настройка.</p></div>
     <div class="export-buttons"><button type="button" class="btn btn-outline" id="export-json" disabled>↓ JSON</button><button type="button" class="btn btn-primary" id="export-glb" disabled>↓ Экспорт GLB</button></div>
    </div>
   </section>
-  <div class="status-strip"><span>◆ <b>MediaPipe Pose</b> · 33 точки тела</span><span>◆ Всё тело: голова, руки и ноги</span><span>◆ Ключи с точным временем*</span><span>◆ Без загрузки видео на сервер</span></div>
+  <div class="status-strip"><span id="performance-status">Распознавание: ожидание</span><span>◆ <b>MediaPipe Pose</b> · 33 точки тела</span><span>◆ Всё тело: голова, руки и ноги</span><span>◆ Ключи с точным временем*</span><span>◆ Без загрузки видео на сервер</span></div>
   <p class="footnote">* Движения записываются с частотой фактического распознавания (обычно ниже 30 К/С). Между ключами GLB воспроизводит плавные повороты. Пальцы и перемещение всего персонажа в пространстве пока не отслеживаются.</p>
  </main>
 </div>
