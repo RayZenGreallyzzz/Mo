@@ -8,7 +8,8 @@ test('character selection and export with animation are connected',()=>{
  assert.ok(html.includes('id="load-character"'));
  assert.ok(main.includes('new GLTFLoader().loadAsync'));
  assert.ok(main.includes('state.character?.model||rigRoot'));
- assert.ok(main.includes('state.frames.flatMap(f=>retargetTrack'));
+ assert.ok(main.includes('state.frames.flatMap(f=>f.targetRotations?.[pair.sourceName]'));
+ assert.ok(main.includes('retargetTrack(pair,f.rotations[pair.sourceName])'));
  assert.ok(main.includes('node.isSkinnedMesh'));
 });
 test('pose capture is not hard-capped to 10 fps and smoothing defaults low',()=>{
