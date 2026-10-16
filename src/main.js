@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+import { deriveDirections, trackingSign } from './tracking.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
 
@@ -9,17 +10,21 @@ import { Share } from '@capacitor/share';
 // The simple fixed-proportion Mixamo-named 22-joint mannequin is NOT a generic
 // retargeter for the user's own model; exported GLB is a motion source for later retargeting.
 const $ = id => document.getElementById(id);
+const MoCapCamera = registerPlugin('MoCapCamera');
 const MODEL_URL = new URL('/pose_landmarker_lite.task', location.origin).href;
 // Pose model and MediaPipe WASM are served locally inside the APK or from the hosted site.
 const WASM_URL = new URL('/wasm/', location.origin).href.replace(/\/$/, '');
 const trackedNames = [
- 'mixamorigSpine1','mixamorigSpine2','mixamorigNeck','mixamorigHead',
- 'mixamorigLeftArm','mixamorigLeftForeArm','mixamorigRightArm','mixamorigRightForeArm'
+ 'mixamorigHips','mixamorigSpine1','mixamorigSpine2','mixamorigNeck','mixamorigHead',
+ 'mixamorigLeftShoulder','mixamorigLeftArm','mixamorigLeftForeArm','mixamorigLeftHand',
+ 'mixamorigRightShoulder','mixamorigRightArm','mixamorigRightForeArm','mixamorigRightHand',
+ 'mixamorigLeftUpLeg','mixamorigLeftLeg','mixamorigLeftFoot',
+ 'mixamorigRightUpLeg','mixamorigRightLeg','mixamorigRightFoot'
 ];
 const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  processing:false,recording:false,reviewMode:false,frames:[],startTime:0,recordedDuration:0,
  playback:false,playbackStart:0,lastInfer:0,lastVideoTime:-1,
- lastCapture:0,smoothed:0.45,visibility:0.4,demoStart:0,lastResult:null};
+ lastCapture:0,smoothed:0.45,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false};
 let toastTimer;
 function toast(message){const el=$('toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),4500);}
 function status(message){$('source-status').textContent=message;}
@@ -142,36 +147,50 @@ function orientBone(bone,relativeDirection,smoothing){
  bone.quaternion.slerp(workingQ,Math.min(1,Math.max(.05,smoothing)));
  rigRoot.updateMatrixWorld(true);
 }
-const LM={nose:0,leftEar:7,rightEar:8,leftShoulder:11,rightShoulder:12,leftElbow:13,rightElbow:14,leftWrist:15,rightWrist:16,leftHip:23,rightHip:24};
-function valid(landmarks,index){const l=landmarks?.[index];return l&&Number.isFinite(l.x)&&Number.isFinite(l.y)&&Number.isFinite(l.z)&& (l.visibility??1)>=state.visibility;}
-function point(l){return new THREE.Vector3(l.x,-l.y,-l.z);}
-function dir(lm,a,b){return valid(lm,a)&&valid(lm,b)?point(lm[b]).sub(point(lm[a])):null;}
-function mid(lm,a,b){return point(lm[a]).add(point(lm[b])).multiplyScalar(.5);}
+// MediaPipe's semantic LEFT and RIGHT landmark indexes are never swapped.
+// The checkbox is presentation only (CSS); it never changes these coordinates.
+// If a camera's world coordinate handedness differs, one stable sign is estimated
+// from left/right shoulders, once per source, to match the mannequin bind pose.
+const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
 function applyPose(data){
  const landmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
  if(!landmarks)return false;
- const visual=data?.landmarks?.[0];
- if(!(valid(landmarks,11)&&valid(landmarks,12)&&valid(landmarks,13)&&valid(landmarks,14)))return false;
+ if(!state.handednessReady){
+  const sign=trackingSign(landmarks,state.visibility);
+  if(sign){state.worldXSign=sign;state.handednessReady=true;}
+ }
+ const dirs=deriveDirections(landmarks,state.visibility,state.worldXSign);
  const strength=1-state.smoothed*.88;
- const sh=mid(landmarks,11,12);
- if(valid(landmarks,23)&&valid(landmarks,24)){
-  const torso=sh.sub(mid(landmarks,23,24));
-  // Upper-body only: pelvis and both legs are never modified.
-  orientBone(joints.Spine1,torso,strength*.37);
-  orientBone(joints.Spine2,torso,strength*.24);
+ let changed=false;
+ const move=(name,scale=1)=>{
+  const target=dirs[name];
+  if(!target||!joints[name])return;
+  orientBone(joints[name],mpPoint(target),strength*scale);changed=true;
+ };
+ // The body follows pelvis and shoulders; arms and legs use their OWN
+ // independent source landmarks. An occluded limb holds its own last pose.
+ move('Hips',.25);
+ move('Spine1',.34);
+ move('Spine2',.26);
+ move('LeftShoulder',.45);
+ move('RightShoulder',.45);
+ for(const side of ['Left','Right']){
+  move(side+'Arm');move(side+'ForeArm');move(side+'Hand',.7);
+  move(side+'UpLeg');move(side+'Leg');move(side+'Foot',.72);
  }
- for(const [side,s,e,w] of [['Left',11,13,15],['Right',12,14,16]]){
-  const upper=dir(landmarks,s,e);
-  if(upper)orientBone(joints[side+'Arm'],upper,strength);
-  const lower=dir(landmarks,e,w);
-  if(lower)orientBone(joints[side+'ForeArm'],lower,strength);
+ move('Neck',.5);
+ // Independent head tilt/yaw using ears, eyes and nose. Missing landmarks
+ // never pull the opposite arm or leg into the same pose.
+ const head=dirs.Head;
+ if(head){
+  const target=new THREE.Euler(head[0],head[1],head[2],'XYZ');
+  workingQ.setFromEuler(target);
+  joints.Head.quaternion.slerp(workingQ,Math.min(1,strength*.62));
+  changed=true;
  }
- if(valid(landmarks,0)&&valid(landmarks,11)&&valid(landmarks,12)){
-  const head=point(landmarks[0]).sub(mid(landmarks,11,12));
-  orientBone(joints.Neck,head,strength*.3);
- }
- state.lastResult=visual?data:state.lastResult;
- return true;
+ rigRoot.updateMatrixWorld(true);
+ state.lastResult=data?.landmarks?.length?data:state.lastResult;
+ return changed;
 }
 function applyDemo(time){
  neutral();
@@ -182,6 +201,10 @@ function applyDemo(time){
  joints.RightForeArm.quaternion.setFromEuler(new THREE.Euler(0,0,.72+.12*swing));
  joints.Spine2.quaternion.setFromEuler(new THREE.Euler(.035*Math.sin(time*1.5),0,.085*Math.sin(time*1.7)));
  joints.Neck.quaternion.setFromEuler(new THREE.Euler(0,.12*Math.sin(time*2),0));
+ joints.LeftUpLeg.quaternion.setFromEuler(new THREE.Euler(.18*Math.sin(time*2.6),0,0));
+ joints.RightUpLeg.quaternion.setFromEuler(new THREE.Euler(-.18*Math.sin(time*2.6),0,0));
+ joints.LeftLeg.quaternion.setFromEuler(new THREE.Euler(-.12*Math.max(0,Math.sin(time*2.6)),0,0));
+ joints.RightLeg.quaternion.setFromEuler(new THREE.Euler(-.12*Math.max(0,-Math.sin(time*2.6)),0,0));
  rigRoot.updateMatrixWorld(true);
 }
 function snapshot(seconds){
@@ -202,7 +225,7 @@ function startRecording(){
  state.recording=true;state.startTime=performance.now();state.lastCapture=-1;
  if(state.mode==='video'&&$('video').paused){$('video').play().catch(()=>{});}
  snapshot(0);setControls();$('timer').textContent='00:00.0';$('timeline-label').textContent='Идёт запись…';
- toast('Запись началась — двигай руками!');
+ toast('Запись началась — двигай руками, ногами и головой!');
 }
 function stopRecording(){
  state.recording=false;state.reviewMode=true;state.recordedDuration=state.frames.at(-1)?.t||0;
@@ -259,9 +282,9 @@ async function downloadBlob(blob,filename){
 const safeName=()=>String($('clip-name').value||'Motion').trim().replace(/[^\p{L}\p{N}_-]+/gu,'_').slice(0,50)||'Motion';
 $('export-json').addEventListener('click',async()=>{
  if(state.frames.length<2)return;
- const pack={format:'MoCapStudio-upperbody-v1',fps:30,duration:state.recordedDuration,
- source:state.mode,scope:'upper-body-only',model:'fixed Mixamo-named demo mannequin',
- notes:'Root and legs are fixed. Keys contain LOCAL bone quaternions. No raw video is included.',
+ const pack={format:'MoCapStudio-fullbody-v2',fps:30,duration:state.recordedDuration,
+ source:state.mode,scope:'full-body',model:'fixed Mixamo-named demo mannequin',
+ notes:'Full-body local bone rotations; no global translation/root motion, finger capture or raw video included.',
  bones:trackedNames,frames:state.frames};
  try{await downloadBlob(new Blob([JSON.stringify(pack,null,2)],{type:'application/json'}),safeName()+'_MoCap.json');toast('JSON подготовлен для сохранения');}catch(e){toast('Не удалось сохранить JSON: '+(e?.message||e));}
 });
@@ -290,7 +313,7 @@ $('export-glb').addEventListener('click',async()=>{
 
 // Draw landmark overlay correctly even when the source video is letterboxed.
 const video=$('video'),overlay=$('landmark-canvas'),ctx=overlay.getContext('2d');
-const pairs=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[0,11],[0,12]];
+const pairs=[[11,12],[11,13],[13,15],[12,14],[14,16],[11,23],[12,24],[23,24],[23,25],[25,27],[24,26],[26,28],[27,31],[28,32],[0,7],[0,8]];
 function renderLandmarks(pose){
  const rect=$('video-stage').getBoundingClientRect(),w=Math.max(1,Math.round(rect.width)),h=Math.max(1,Math.round(rect.height));
  if(overlay.width!==w||overlay.height!==h){overlay.width=w;overlay.height=h;}
@@ -305,7 +328,7 @@ function renderLandmarks(pose){
   const p=pos(a),q=pos(b);ctx.beginPath();ctx.moveTo(...p);ctx.lineTo(...q);ctx.stroke();
  }
  ctx.shadowBlur=0;
- for(const i of [0,11,12,13,14,15,16,23,24]){
+ for(const i of [0,7,8,11,12,13,14,15,16,23,24,25,26,27,28,31,32]){
   if(!valid(points,i))continue;const p=pos(i);ctx.beginPath();ctx.arc(...p,i===15||i===16?5:4,0,Math.PI*2);ctx.fillStyle='#b6ffff';ctx.fill();
  }
 }
@@ -324,7 +347,7 @@ async function ensureLandmarker(){
   throw new Error('Ошибка локальной модели MediaPipe: '+(e?.message||e));}
 }
 async function stopSource({keepPose=false}={}){
- state.source=false;state.lastVideoTime=-1;state.lastInfer=0;
+ state.source=false;state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
  state.playback=false;state.reviewMode=false;
  if(state.stream){for(const t of state.stream.getTracks())t.stop();state.stream=null;}
@@ -348,10 +371,12 @@ async function startCamera(){
  await stopSource({keepPose:true});
  status('Подключаем камеру…');
  try{
+  // Request the Android runtime CAMERA permission before WebView getUserMedia.
+  if(Capacitor.isNativePlatform())await MoCapCamera.requestCamera();
   state.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:'user',width:{ideal:640},height:{ideal:480},frameRate:{ideal:24,max:30}}});
   video.srcObject=state.stream;video.muted=true;video.loop=false;video.controls=false;await video.play();
   showVideo();status('Готовим распознавание…');
-  await ensureLandmarker();state.source=true;status('Камера активна');setControls();toast('Камера готова. Покажи руки и плечи.');
+  await ensureLandmarker();state.source=true;status('Камера активна');setControls();toast('Камера готова. Встань в полный рост, чтобы были видны руки, ноги и голова.');
  }catch(e){await stopSource({keepPose:true});status('Ошибка камеры');const m=e?.name==='NotAllowedError'||e?.name==='PermissionDeniedError'?'Android запретил доступ к камере. Разреши камеру для MoCap Studio в настройках приложения и попробуй снова.':e?.name==='NotFoundError'?'На устройстве не найдена доступная камера.':(e?.message||String(e));toast(m);}
 }
 $('start-camera').addEventListener('click',startCamera);
@@ -388,7 +413,7 @@ function infer(now){
  try{
   const result=state.pose.detectForVideo(video,now);
   const found=applyPose(result);renderLandmarks(result);
-  $('pose-label').textContent=found?'● СКЕЛЕТ НАЙДЕН':'○ ПОКАЖИ ПЛЕЧИ И ЛОКТИ';
+  $('pose-label').textContent=found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ';
   $('live-status').innerHTML='<span class="green-dot"></span> '+(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ');
   if(state.recording&&found&&now-state.lastCapture>=64){snapshot((now-state.startTime)/1000);state.lastCapture=now;}
  }catch(e){console.warn('Pose detection issue:',e);status('Ошибка кадра распознавания');}
@@ -418,4 +443,6 @@ function animate(){
  renderer.render(scene,camera);
 }
 neutral();setControls();animate();
-showEngine('Демо готово. Для камеры нужна загрузка MediaPipe.');
+showEngine('Демо готово · полный скелет тела.');
+const splash=$('launch-splash');
+if(splash)setTimeout(()=>splash.classList.add('loaded'),1850);
