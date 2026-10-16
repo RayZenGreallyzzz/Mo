@@ -1,0 +1,43 @@
+name: MoCap Studio Android APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Download offline Pose model
+        run: bash scripts/get-model.sh
+      - name: Test MoCap source
+        run: npm test
+      - name: Build offline web bundle
+        run: npm run build
+      - name: Generate Android project
+        run: npx cap add android
+      - name: Declare Android camera permission
+        run: python3 scripts/camera-manifest.py
+      - name: Sync and compile Android project
+        run: |
+          npx cap sync android
+          chmod +x android/gradlew
+          cd android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MoCap-Studio-Android-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

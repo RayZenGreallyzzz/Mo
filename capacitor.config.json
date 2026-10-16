@@ -1,0 +1,8 @@
+{
+  "appId": "com.rayzeng.mocapstudio",
+  "appName": "MoCap Studio",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
