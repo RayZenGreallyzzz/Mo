@@ -5,21 +5,25 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#080e1b" />
 <title>MoCap Studio — захват движений</title>
+<link rel="icon" type="image/png" href="/app_icon.png"/>
 <link rel="stylesheet" href="/src/style.css"/>
 
 <script type="module" src="/src/main.js"></script>
 </head>
 <body>
+<div id="launch-splash" class="launch-splash" role="status" aria-label="Загрузка MoCap Studio">
+ <img src="/launch.webp" alt="MoCap Studio — загрузка" />
+</div>
 <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
 <div class="app">
  <header class="topbar">
-  <div class="brand"><span class="mark">✦</span><div><h1>MoCap <em>Studio</em></h1><small>HTML5 · МОУШН-КАПЧЕР · БЕТА</small></div></div>
+  <div class="brand"><span class="mark"><img src="/app_icon.png" alt=""/></span><div><h1>MoCap <em>Studio</em></h1><small>ANDROID · ЗАХВАТ ДВИЖЕНИЙ · 0.3</small></div></div>
   <span class="top-pill"><span class="green-dot"></span> ПРОТОТИП ДЛЯ ANDROID</span>
  </header>
  <main>
   <section class="intro">
    <div><div class="eyebrow">ДВИЖЕНИЕ → СКЕЛЕТ → АНИМАЦИЯ</div><h2>Оживи персонажа <span>своими движениями</span></h2>
-   <p>Запиши движение рук и корпуса на камеру или возьми готовый ролик. Проверь скелет в 3D, запиши кадры и экспортируй GLB.</p></div>
+   <p>Запиши движение головы, рук, корпуса и ног на камеру или возьми готовый ролик. Проверь скелет в 3D, запиши кадры и экспортируй GLB.</p></div>
    <span id="engine-chip" class="engine-chip">● Модель распознавания ещё не загружена</span>
   </section>
   <div class="mode-tabs" role="group" aria-label="Источник движений">
@@ -38,7 +42,7 @@
      <div id="video-placeholder" class="stage-placeholder">
       <div class="placeholder-icon">⌁</div>
       <strong>Твоя камера — студия захвата</strong>
-      <p>Встань лицом к камере так, чтобы были видны оба плеча, локти и кисти.</p>
+      <p>Встань в полный рост, чтобы были видны голова, обе руки, колени и стопы.</p>
      </div>
      <span class="stage-corner tl"></span><span class="stage-corner tr"></span><span class="stage-corner bl"></span><span class="stage-corner br"></span>
      <span id="rec-label" class="rec-label" hidden>● REC</span>
@@ -65,7 +69,7 @@
     <div class="field"><label for="clip-name">Название движения</label><input id="clip-name" maxlength="64" value="Махание рукой" /></div>
     <div class="field"><label for="smooth">Сглаживание <b id="smooth-value">45%</b></label><input id="smooth" type="range" min="0" max="95" value="45" /></div>
     <div class="field"><label for="confidence">Минимальная видимость <b id="confidence-value">40%</b></label><input id="confidence" type="range" min="15" max="85" value="40" /></div>
-    <div class="field check-field"><label class="checkbox-label"><input type="checkbox" id="mirror" checked/> Отразить камеру как зеркало</label><small>Влияет на изображение, не переименовывает кости.</small></div>
+    <div class="field check-field"><label class="checkbox-label"><input type="checkbox" id="mirror" checked/> Отразить камеру как зеркало</label><small>Только картинка — 3D-скелет и запись всегда без зеркального дублирования.</small></div>
    </div>
    <div class="record-bar">
     <button type="button" id="record" class="btn btn-record" disabled>● Начать запись</button>
@@ -76,12 +80,12 @@
    </div>
    <div class="scrubber"><input type="range" id="timeline" min="0" max="100" value="0" disabled aria-label="Просмотр записанной анимации"/><div class="scrub-label"><span>НАЧАЛО</span><span id="timeline-label">Нет записи</span><span>КОНЕЦ</span></div></div>
    <div class="export-bar">
-    <div><strong>Готово для Animation Studio</strong><p>Сохраняем только движения верхней части тела; ноги и таз остаются в исходной позе. До обработки видео результат нужно проверить.</p></div>
+    <div><strong>Готово для Animation Studio</strong><p>Сохраняем движения головы, рук, корпуса, таза, ног и стоп. Каждая сторона отслеживается отдельно. До обработки видео результат нужно проверить.</p></div>
     <div class="export-buttons"><button type="button" class="btn btn-outline" id="export-json" disabled>↓ JSON</button><button type="button" class="btn btn-primary" id="export-glb" disabled>↓ Экспорт GLB</button></div>
    </div>
   </section>
-  <div class="status-strip"><span>◆ <b>MediaPipe Pose</b> · 33 точки тела</span><span>◆ Верхняя часть тела</span><span>◆ Ключи с точным временем*</span><span>◆ Без загрузки видео на сервер</span></div>
-  <p class="footnote">* Движения записываются с частотой фактического распознавания (обычно ниже 30 К/С). Между ключами GLB воспроизводит плавные повороты. Отдельные пальцы и взаимодействие с оружием пока не отслеживаются.</p>
+  <div class="status-strip"><span>◆ <b>MediaPipe Pose</b> · 33 точки тела</span><span>◆ Всё тело: голова, руки и ноги</span><span>◆ Ключи с точным временем*</span><span>◆ Без загрузки видео на сервер</span></div>
+  <p class="footnote">* Движения записываются с частотой фактического распознавания (обычно ниже 30 К/С). Между ключами GLB воспроизводит плавные повороты. Пальцы и перемещение всего персонажа в пространстве пока не отслеживаются.</p>
  </main>
 </div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
