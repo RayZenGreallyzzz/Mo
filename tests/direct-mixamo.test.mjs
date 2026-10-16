@@ -110,3 +110,23 @@ test('full-body target rotations are preserved by capture/replay',()=>{
  assert.ok(target.head.quaternion.angleTo(oldHead)<1e-6);
  assert.ok(target.spine.quaternion.angleTo(oldSpine)<1e-6);
 });
+
+test('cross-body forward strike bends arm and elbow without rotating opposite arm or hips',()=>{
+ const {driver,target}=create();
+ const initRight=target.right.arm.quaternion.clone();
+ for(let i=0;i<4;i++){
+   fitMixamoDirections(driver,{
+     LeftArm:[-.25,.12,.96],LeftForeArm:[-.50,.02,.86],
+     RightArm:[-1,0,0],Spine1:[0,1,0]
+   },1000+i*40);
+ }
+ assert.ok(target.left.arm.quaternion.angleTo(new THREE.Quaternion())>.2);
+ assert.ok(target.left.forearm.quaternion.angleTo(new THREE.Quaternion())>.2);
+ assert.ok(target.hips.quaternion.angleTo(new THREE.Quaternion())<1e-8);
+ assert.ok(target.right.arm.quaternion.angleTo(initRight)<1e-8);
+ assert.ok(target.left.shoulder.quaternion.angleTo(new THREE.Quaternion())<
+    THREE.MathUtils.degToRad(13));
+ for(const j of driver.joints){
+   assert.ok([j.bone.quaternion.x,j.bone.quaternion.y,j.bone.quaternion.z,j.bone.quaternion.w].every(Number.isFinite));
+ }
+});
