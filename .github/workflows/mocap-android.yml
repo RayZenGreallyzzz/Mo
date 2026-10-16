@@ -30,6 +30,8 @@ jobs:
         run: npx cap add android
       - name: Declare Android camera permission
         run: python3 scripts/camera-manifest.py
+      - name: Apply chosen mascot icon and splash; register camera plugin
+        run: bash scripts/android-branding.sh
       - name: Sync and compile Android project
         run: |
           npx cap sync android
