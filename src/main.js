@@ -6,6 +6,7 @@ import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } f
 import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose,resetDirectMixamoCalibration} from './direct-mixamo.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign, deriveMannequinScreenDirections } from './tracking.js';
+import {fitMannequinBone} from './mannequin-solver.js';
 import {createSmartPoseTracker,resetSmartPoseTracker,stabilizePoseLandmarks} from './smart-pose.js';
 import {gateObservedPose} from './visibility-gate.js';
 import {updateCalibratedHeading,resetHeading} from './body-orientation.js';
@@ -293,24 +294,11 @@ $('character-file').addEventListener('change',async event=>{
   toast('GLB: '+(e?.message||e));
  }finally{if(url)URL.revokeObjectURL(url);state.loadingCharacter=false;setControls();}
 });
-const workingQ=new THREE.Quaternion(),parentQ=new THREE.Quaternion(),tempV=new THREE.Vector3();
+const workingQ=new THREE.Quaternion();
 function orientBone(bone,relativeDirection,smoothing){
- if(!relativeDirection||relativeDirection.lengthSq()<1e-6)return;
- // Update only the parent chain instead of recalculating the whole skeleton
- // once for every arm, knee and finger. This is important on Android.
- bone.parent.updateWorldMatrix(true,false);
- bone.parent.getWorldQuaternion(parentQ);
- tempV.copy(relativeDirection).normalize().applyQuaternion(parentQ.invert());
- // Terminal hand bones have no child in the minimal Mixamo mannequin.
- // Still rotate them from wrist → hand landmark for GLB retargeting.
- const reference=bone.children.find(c=>c.isBone)?.position ||
-   (bone.name.endsWith('LeftHand')?new THREE.Vector3(1,0,0):
-    bone.name.endsWith('RightHand')?new THREE.Vector3(-1,0,0):null);
- if(!reference||reference.lengthSq()<1e-7)return;
- workingQ.setFromUnitVectors(reference.clone().normalize(),tempV.normalize());
-// Bad landmarks must never force a joint into a dangerous 180-degree pose.
- const safe=clampJointQuaternion(bone.name,rest.get(bone.name),workingQ);
- bone.quaternion.slerp(safe,Math.min(1,Math.max(.05,smoothing)));
+ if(!relativeDirection||relativeDirection.lengthSq()<1e-8)return false;
+ return fitMannequinBone(bone,relativeDirection.toArray(),
+   rest.get(bone.name),smoothing);
 }
 // MediaPipe's semantic LEFT and RIGHT landmark indexes are never swapped.
 // The checkbox is presentation only (CSS); it never changes these coordinates.
@@ -360,21 +348,28 @@ function applyPose(data,frameNow=performance.now()){
   rigRoot.quaternion.setFromAxisAngle(new THREE.Vector3(0,1,0),-yaw);
   rigRoot.updateWorldMatrix(true,true);
  }
- const strength=Math.max(.23,1-state.smoothed*.75); // 12% default: less visual lag
+ const strength=Math.max(.40,1-state.smoothed*.45); // prioritize real joint response, smooth later
  let changed=false;
  const move=(name,scale=1)=>{
   const target=dirs[name];
   if(!target||!joints[name])return;
-  boneLastSeen.set(name,performance.now());
-  orientBone(joints[name],mpPoint(target),strength*scale);changed=true;
+  if(orientBone(joints[name],mpPoint(target),strength*scale)){
+    boneLastSeen.set(name,performance.now());changed=true;
+  }
  };
  // The body follows pelvis and shoulders; arms and legs use their OWN
  // independent source landmarks. An occluded limb holds its own last pose.
- move('Hips',.65);
- move('Spine1',.72);
- move('Spine2',.75);
- move('LeftShoulder',.8);
- move('RightShoulder',.8);
+ // A partial image cannot reliably drive pelvis/spine. Keep the base
+ // stable so upper arm aiming isn't cancelled by inaccurate parent turns.
+ if(state.poseCoverage==='full'){
+  move('Hips',.55);move('Spine1',.56);move('Spine2',.56);
+ }else{
+  for(const key of ['Hips','Spine1','Spine2']){
+   joints[key].quaternion.slerp(rest.get(joints[key].name),.22);
+  }
+ }
+ // The clavicles are NOT separately reoriented toward the upper arms;
+ // doing so double-counts one segment and bends/shortens arm raises.
  for(const side of ['Left','Right']){
   move(side+'Arm');move(side+'ForeArm');move(side+'Hand',.88);
   move(side+'UpLeg');move(side+'Leg');move(side+'Foot',.84);
