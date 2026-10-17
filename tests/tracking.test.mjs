@@ -32,3 +32,40 @@ test('head uses ears/nose independently of limbs',()=>{
  const d=deriveDirections(p,.4);
  assert.ok(d.Head?.every(Number.isFinite));assert.equal(d.LeftArm,undefined);
 });
+
+test('default mannequin follows the same onscreen arm directions as the blue skeleton',async()=>{
+ const {deriveMannequinScreenDirections}=await import('../src/tracking.js');
+ const points=sample();
+ set(points,11,.68,.33);set(points,12,.32,.33);
+ set(points,13,.75,.70);set(points,15,.79,.89); // left arm DOWN
+ set(points,14,.14,.27);set(points,16,.08,.20); // right arm UP/LEFT
+ const screen=deriveMannequinScreenDirections(points,.4);
+ assert.ok(screen.LeftArm[1]<0,'left arm must go down');
+ assert.ok(screen.RightArm[1]>0,'right arm must go up');
+ assert.ok(screen.LeftArm[0]>0,'left x follows camera image');
+ assert.ok(screen.RightArm[0]<0,'right x follows camera image');
+ assert.equal(screen.LeftArm[2],0);
+ assert.equal(screen.RightArm[2],0);
+});
+test('default mannequin uses stable screen axes, never initial world-space handedness guess',async()=>{
+ const {deriveMannequinScreenDirections}=await import('../src/tracking.js');
+ const points=sample();
+ set(points,11,.7,.3);set(points,12,.3,.3);
+ set(points,13,.8,.12);set(points,15,.9,.08); // left arm raised
+ set(points,14,.2,.66);set(points,16,.1,.9); // right arm lowered
+ const got=deriveMannequinScreenDirections(points,.4);
+ assert.ok(got.LeftArm[1]>0);
+ assert.ok(got.RightArm[1]<0);
+ const accidentalFlip=deriveDirections(points,.4,-1);
+ assert.notEqual(got.LeftArm[0],accidentalFlip.LeftArm[0]);
+});
+test('cropped elbow cannot command screen-space forearm',async()=>{
+ const {deriveMannequinScreenDirections}=await import('../src/tracking.js');
+ const points=sample();
+ set(points,11,.65,.3);set(points,13,.8,.5);
+ set(points,15,1.20,.7); // gate sets an offscreen wrist to invisible
+ points[15].visibility=0;
+ const d=deriveMannequinScreenDirections(points,.4);
+ assert.ok(d.LeftArm);
+ assert.equal(d.LeftForeArm,undefined);
+});

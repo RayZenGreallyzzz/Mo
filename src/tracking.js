@@ -64,3 +64,15 @@ export function deriveDirections(landmarks,minVisibility=.4,xSign=1){
  }
  return out;
 }
+
+// Screen-space directions for the DEFAULT mannequin ONLY.
+// Exactly the same 2D MediaPipe pixels that draw the blue skeleton drive
+// its projected X/Y bone directions. The preview's CSS mirror is applied
+// equally to both the camera and the 3D canvas (never in this computation).
+// This prevents a wrong 3D world-landmark handedness estimate from pinning
+// one arm in a T-pose while the overlay arm clearly moves.
+export function deriveMannequinScreenDirections(landmarks,minVisibility=.4){
+ if(!Array.isArray(landmarks))return {};
+ const flat=landmarks.map(p=>p?{...p,z:0}:p);
+ return deriveDirections(flat,minVisibility,1);
+}
