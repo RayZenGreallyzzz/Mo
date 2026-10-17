@@ -29,7 +29,7 @@ test('user real-video scenario: camera sees face and shoulders, hips outside vie
  assert.equal(dirs.BodyYaw,undefined);
  assert.equal(dirs.LeftUpLeg,undefined);
  assert.equal(dirs.RightUpLeg,undefined);
- assert.ok(dirs.LeftArm===undefined);
+ assert.ok(dirs.LeftArm,'visible shoulder/elbow must remain trackable in upper-body mode');
  assert.deepEqual(world,before,'original MediaPipe result untouched');
 });
 test('full-body observed in image preserves all actual leg joints',()=>{
@@ -69,4 +69,24 @@ test('low confidence hip invalidates inferred full body even when inside image',
  const got=gateObservedPose(world,image,.4);
  assert.equal(got.coverage,'upper');
  assert.equal(got.landmarks[26].presence,0);
+});
+
+test('a hand outside image bounds cannot fake an invisible punch',()=>{
+ const {image,world}=framed();
+ put(image,13,.44,.39);put(image,15,1.27,.36);
+ const got=gateObservedPose(world,image,.4);
+ assert.equal(got.landmarks[13].visibility,.99);
+ assert.equal(got.landmarks[15].visibility,0);
+ const dirs=deriveDirections(got.landmarks,.4);
+ assert.ok(dirs.LeftArm);
+ assert.equal(dirs.LeftForeArm,undefined);
+});
+test('head and visible shoulders remain tracked even if camera cannot see the legs',()=>{
+ const {image,world}=framed();
+ put(image,0,.50,.11);
+ put(image,23,.40,1.4);put(image,24,.6,1.4);
+ const got=gateObservedPose(world,image,.4);
+ assert.equal(got.coverage,'upper');
+ for(const i of [0,11,12]) assert.equal(got.landmarks[i].visibility,.99);
+ for(const i of [23,24,25,26]) assert.equal(got.landmarks[i].visibility,0);
 });
