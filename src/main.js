@@ -5,7 +5,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { buildRetargetMap, retargetPose, retargetTrack, clampJointQuaternion } from './character.js';
 import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,applyDirectMixamoPose,resetDirectMixamoCalibration} from './direct-mixamo.js';
 import { Capacitor, registerPlugin } from '@capacitor/core';
-import { deriveDirections, trackingSign } from './tracking.js';
+import { deriveDirections, trackingSign, deriveMannequinScreenDirections } from './tracking.js';
 import {createSmartPoseTracker,resetSmartPoseTracker,stabilizePoseLandmarks} from './smart-pose.js';
 import {gateObservedPose} from './visibility-gate.js';
 import {updateCalibratedHeading,resetHeading} from './body-orientation.js';
@@ -321,7 +321,8 @@ function valid(landmarks,index){
 }
 const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
 function applyPose(data,frameNow=performance.now()){
- const rawLandmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
+ const imageLandmarks=data?.landmarks?.[0];
+ const rawLandmarks=data?.worldLandmarks?.[0]||imageLandmarks;
  if(!rawLandmarks){
   state.poseCoverage='none';
   relaxStaleBones();rigRoot.updateMatrixWorld(true);syncCharacter({});
@@ -330,16 +331,24 @@ function applyPose(data,frameNow=performance.now()){
  // World coordinates alone are not evidence that a joint is in the image.
  // In the real Android recording the camera only sees head/shoulders; 3D
  // MediaPipe may still hallucinate pelvis and knees outside the camera.
- const gated=gateObservedPose(rawLandmarks,data?.landmarks?.[0],state.visibility);
+ const gated=gateObservedPose(rawLandmarks,imageLandmarks,state.visibility);
  state.poseCoverage=gated.coverage;
  const processed=stabilizePoseLandmarks(smartPoseTracker,gated.landmarks,frameNow,state.visibility);
  const landmarks=processed.landmarks;
+ // The UI skeleton and the default mannequin must see the SAME 2D limb
+ // positions. World-landmark axes and handedness are used separately for
+ // imported Mixamo GLBs, which still require genuine depth.
+ const screenLandmarks=imageLandmarks?
+   gateObservedPose(imageLandmarks,imageLandmarks,state.visibility).landmarks:null;
+ const screenDirs=screenLandmarks?
+   deriveMannequinScreenDirections(screenLandmarks,state.visibility):null;
  smartRecovered=processed.recovered;smartRejected=processed.rejected;
  if(!state.handednessReady){
   const sign=trackingSign(landmarks,state.visibility);
   if(sign){state.worldXSign=sign;state.handednessReady=true;}
  }
- const dirs=deriveDirections(landmarks,state.visibility,state.worldXSign);
+ const worldDirs=deriveDirections(landmarks,state.visibility,state.worldXSign);
+ const dirs=screenDirs||worldDirs;
  const strength=Math.max(.23,1-state.smoothed*.75); // 12% default: less visual lag
  let changed=false;
  const move=(name,scale=1)=>{
@@ -374,7 +383,7 @@ function applyPose(data,frameNow=performance.now()){
  }
  relaxStaleBones();
  rigRoot.updateMatrixWorld(true);
- syncCharacter(dirs);
+ syncCharacter(state.character?worldDirs:dirs);
  state.lastResult=data?.landmarks?.length?data:state.lastResult;
  return changed;
 }
