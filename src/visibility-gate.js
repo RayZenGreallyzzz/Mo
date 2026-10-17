@@ -20,6 +20,12 @@ export function gateObservedPose(worldLandmarks,imageLandmarks,min=.4){
  // No 2D image geometry means 3D joint coordinates cannot prove that
  // anything below the shoulders is actually in view.
  const good=i=>Boolean(image && imageVisible(image[i],min));
+ // Offscreen model-estimated wrists, elbows and even faces are not observed.
+ // This preserves joints that really are in frame, unlike disabling an
+ // entire limb group whenever lower-body framing is incomplete.
+ for(let i=0;i<result.length;i++){
+   if(!good(i))result[i]=masked(result[i]);
+ }
  const shoulders=good(11)&&good(12);
  const shoulderY=shoulders?average(image[11].y,image[12].y):null;
  const hips=Boolean(shoulders&&good(23)&&good(24) &&
