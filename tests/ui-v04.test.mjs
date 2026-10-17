@@ -19,3 +19,10 @@ test('pose capture is not hard-capped to 10 fps and smoothing defaults low',()=>
  assert.ok(main.includes("options('CPU')"));
  assert.match(html,/id="smooth"[^>]*value="12"/);
 });
+
+test('live mannequin upper arms are not distorted by a second shoulder solve',()=>{
+ assert.ok(!main.includes("move('LeftShoulder',.8)"));
+ assert.ok(!main.includes("move('RightShoulder',.8)"));
+ assert.ok(main.includes("reference.clone().applyQuaternion(base).normalize()"));
+ assert.ok(main.includes("state.poseCoverage==='full'"));
+});

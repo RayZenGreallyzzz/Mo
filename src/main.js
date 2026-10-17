@@ -304,9 +304,10 @@ function orientBone(bone,relativeDirection,smoothing){
    (bone.name.endsWith('LeftHand')?new THREE.Vector3(1,0,0):
     bone.name.endsWith('RightHand')?new THREE.Vector3(-1,0,0):null);
  if(!reference||reference.lengthSq()<1e-7)return;
- workingQ.setFromUnitVectors(reference.clone().normalize(),tempV.normalize());
-// Bad landmarks must never force a joint into a dangerous 180-degree pose.
- const safe=clampJointQuaternion(bone.name,rest.get(bone.name),workingQ);
+ const base=rest.get(bone.name);
+ const restDirection=reference.clone().applyQuaternion(base).normalize();
+ workingQ.setFromUnitVectors(restDirection,tempV.normalize()).multiply(base);
+ const safe=clampJointQuaternion(bone.name,base,workingQ);
  bone.quaternion.slerp(safe,Math.min(1,Math.max(.05,smoothing)));
 }
 // MediaPipe's semantic LEFT and RIGHT landmark indexes are never swapped.
@@ -340,7 +341,7 @@ function applyPose(data,frameNow=performance.now()){
   if(sign){state.worldXSign=sign;state.handednessReady=true;}
  }
  const dirs=deriveDirections(landmarks,state.visibility,state.worldXSign);
- const strength=Math.max(.23,1-state.smoothed*.75); // 12% default: less visual lag
+ const strength=Math.max(.38,1-state.smoothed*.45); // 12% default: less visual lag
  let changed=false;
  const move=(name,scale=1)=>{
   const target=dirs[name];
@@ -350,11 +351,11 @@ function applyPose(data,frameNow=performance.now()){
  };
  // The body follows pelvis and shoulders; arms and legs use their OWN
  // independent source landmarks. An occluded limb holds its own last pose.
- move('Hips',.65);
- move('Spine1',.72);
- move('Spine2',.75);
- move('LeftShoulder',.8);
- move('RightShoulder',.8);
+ if(state.poseCoverage==='full'){
+   move('Hips',.65);move('Spine1',.72);move('Spine2',.75);
+  }
+ // Do not fight upper-arm solving with independent clavicle rotations.
+ // The upper-arm endpoint comes from shoulder -> elbow landmarks.
  for(const side of ['Left','Right']){
   move(side+'Arm');move(side+'ForeArm');move(side+'Hand',.88);
   move(side+'UpLeg');move(side+'Leg');move(side+'Foot',.84);
