@@ -7,6 +7,7 @@ import {createDirectMixamoDriver,fitMixamoDirections,captureDirectMixamoPose,app
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { deriveDirections, trackingSign } from './tracking.js';
 import {createSmartPoseTracker,resetSmartPoseTracker,stabilizePoseLandmarks} from './smart-pose.js';
+import {gateObservedPose} from './visibility-gate.js';
 import {updateCalibratedHeading,resetHeading} from './body-orientation.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
@@ -31,7 +32,7 @@ const state = {mode:'camera',stream:null,blobURL:null,source:false,pose:null,
  processing:false,recording:false,reviewMode:false,frames:[],startTime:0,recordedDuration:0,
  playback:false,playbackStart:0,lastInfer:0,lastVideoTime:-1,
  lastCapture:0,smoothed:0.12,visibility:0.4,demoStart:0,lastResult:null,worldXSign:1,handednessReady:false,
- character:null,loadingCharacter:false,poseFrozen:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0,workerFailureReason:''};
+ character:null,loadingCharacter:false,poseFrozen:false,inferCost:0,delegate:'',lastRender:0,slowFrames:0,sourceGeneration:0,frameAge:0,workerFailureReason:'',poseCoverage:'none'};
 let poseWorker=null,workerReady=false,workerBusy=false,workerDisabled=false,workerTimer=null;
 const boneLastSeen=new Map();
 const smartPoseTracker=createSmartPoseTracker();
@@ -322,10 +323,16 @@ const mpPoint = l=>new THREE.Vector3(l[0],l[1],l[2]);
 function applyPose(data,frameNow=performance.now()){
  const rawLandmarks=data?.worldLandmarks?.[0]||data?.landmarks?.[0];
  if(!rawLandmarks){
+  state.poseCoverage='none';
   relaxStaleBones();rigRoot.updateMatrixWorld(true);syncCharacter({});
   return false;
  }
- const processed=stabilizePoseLandmarks(smartPoseTracker,rawLandmarks,frameNow,state.visibility);
+ // World coordinates alone are not evidence that a joint is in the image.
+ // In the real Android recording the camera only sees head/shoulders; 3D
+ // MediaPipe may still hallucinate pelvis and knees outside the camera.
+ const gated=gateObservedPose(rawLandmarks,data?.landmarks?.[0],state.visibility);
+ state.poseCoverage=gated.coverage;
+ const processed=stabilizePoseLandmarks(smartPoseTracker,gated.landmarks,frameNow,state.visibility);
  const landmarks=processed.landmarks;
  smartRecovered=processed.recovered;smartRejected=processed.rejected;
  if(!state.handednessReady){
@@ -627,7 +634,7 @@ async function ensureLandmarker(){
   }
 }
 async function stopSource({keepPose=false}={}){
- state.source=false;state.sourceGeneration++;state.poseFrozen=false;boneLastSeen.clear();
+ state.source=false;state.sourceGeneration++;state.poseFrozen=false;state.poseCoverage='none';boneLastSeen.clear();
  resetSmartPoseTracker(smartPoseTracker);smartRecovered=0;smartRejected=0;
  resetDirectMixamoCalibration(state.character?.driver);resetCharacterHeading();state.lastVideoTime=-1;state.lastInfer=0;state.worldXSign=1;state.handednessReady=false;
  if(state.recording)stopRecording();
@@ -704,8 +711,15 @@ function onDetection(result,cost,capturedAt,generation){
   state.frameAge=Math.max(0,performance.now()-capturedAt);
   const found=state.poseFrozen?false:applyPose(result,capturedAt);
   renderLandmarks(result);
-  $('pose-label').textContent=state.poseFrozen?'Ⅱ ПАУЗА ПОЗЫ':(found?'● ТЕЛО ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ЧАСТИ ТЕЛА В КАМЕРЕ');
-  $('live-status').innerHTML='<span class="green-dot"></span> '+(state.poseFrozen?'ПАУЗА':(found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ'));
+  const partial=state.poseCoverage==='upper'||state.poseCoverage==='partial';
+  $('pose-label').textContent=state.poseFrozen?'Ⅱ ПАУЗА ПОЗЫ':
+    partial?'● В КАДРЕ НЕ ВСЁ ТЕЛО':
+    state.poseCoverage==='full'?'● ПОЛНЫЙ РОСТ В КАДРЕ':
+    found?'● ОТСЛЕЖИВАЕТСЯ':'○ ПОКАЖИ ТЕЛО В КАМЕРЕ';
+  $('live-status').innerHTML='<span class="green-dot"></span> '+(
+    state.poseFrozen?'ПАУЗА':partial?'ЧАСТИЧНЫЙ ЗАХВАТ':found?'ДВИЖЕНИЕ':'ОЖИДАНИЕ');
+  if(partial)status('Ноги вне кадра · отойди от камеры для полного роста');
+  else if(state.poseCoverage==='full')status('Весь рост виден · захват активен');
   if(state.recording&&found&&capturedAt>=state.startTime&&capturedAt-state.lastCapture>=33){
     snapshot((capturedAt-state.startTime)/1000);state.lastCapture=capturedAt;
   }
