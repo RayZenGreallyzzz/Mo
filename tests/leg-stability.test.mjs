@@ -57,3 +57,13 @@ test('missing shin landmarks cannot invent leg lift on either side',()=>{
  assert.equal(result.lockLeft,true);
  assert.equal(result.lockRight,true);
 });
+
+test('small intentional knee movement registers without waking opposite support leg',()=>{
+ const s=createLegStability();
+ classifyLegActivity(s,standing());
+ const got=classifyLegActivity(s,{...standing(),
+  LeftUpLeg:[.24,-.969,0],LeftLeg:[.2,-.98,0],
+  RightUpLeg:[-.035,-.999,0],RightLeg:[0,-1,0]});
+ assert.equal(got.activeLeft,true);
+ assert.equal(got.lockRight,true);
+});

@@ -47,8 +47,9 @@ export function classifyLegActivity(memory,directions){
    motions[side]=a===null&&b===null?null:Math.max(a??0,(b??0)*.80);
  }
  const left=motions.Left,right=motions.Right;
- // Under 13 degrees is tracking noise / balance corrections, not a kick.
- const deadband=.23;
+ // Ignore camera jitter below about 8 degrees. The old 13-degree deadband
+ // made deliberate short steps and small knee movements look frozen.
+ const deadband=.14;
  let lockLeft=left===null||left<deadband;
  let lockRight=right===null||right<deadband;
  // Clear unilateral lifts must never drive the support leg, even when

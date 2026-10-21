@@ -10,6 +10,7 @@ import {fitMannequinBone} from './mannequin-solver.js';
 import {createSmartPoseTracker,resetSmartPoseTracker,stabilizePoseLandmarks} from './smart-pose.js';
 import {gateObservedPose} from './visibility-gate.js';
 import {updateCalibratedHeading,resetHeading} from './body-orientation.js';
+import {mergeScreenGuidedDirections,isFrontFacingPose} from './screen-guided-pose.js';
 import { shouldSampleFrame, shouldApplyResult } from './frame-pipeline.js';
 import { Filesystem, Directory } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
@@ -339,7 +340,21 @@ function applyPose(data,frameNow=performance.now()){
   if(sign){state.worldXSign=sign;state.handednessReady=true;}
  }
  const worldDirs=deriveDirections(landmarks,state.visibility,state.worldXSign);
- const dirs=screenDirs||worldDirs;
+ // The blue overlay reads visible 2D points. Match limb projection to
+ // those SAME landmarks on front-facing frames; retain depth for punches.
+ // The 3D tracker remains in control for side / backward body turns.
+ const facing=isFrontFacingPose(imageLandmarks,worldDirs.BodyYaw,
+   state.character?.heading.reference??mannequinHeading.reference,state.visibility);
+ const guideOptions={frontFacing:facing,
+   aspect:video.videoHeight?video.videoWidth/video.videoHeight:4/3};
+ const guidedWorld=mergeScreenGuidedDirections(worldDirs,screenDirs,guideOptions);
+ const dirs=screenDirs?{...screenDirs}:guidedWorld;
+ if(screenDirs&&facing){
+   for(const key of ['LeftArm','LeftForeArm','RightArm','RightForeArm',
+     'LeftUpLeg','LeftLeg','RightUpLeg','RightLeg']){
+     if(guidedWorld[key])dirs[key]=guidedWorld[key];
+   }
+ }
  // Real body heading should turn the *default mannequin* as well, not only
  // an imported GLB. BodyYaw is separately gated by visible shoulders + hips,
  // therefore a head-only turn cannot spin the whole mannequin.
@@ -389,7 +404,7 @@ function applyPose(data,frameNow=performance.now()){
  }
  relaxStaleBones();
  rigRoot.updateMatrixWorld(true);
- syncCharacter(state.character?worldDirs:dirs);
+ syncCharacter(state.character?guidedWorld:dirs);
  state.lastResult=data?.landmarks?.length?data:state.lastResult;
  return changed;
 }
