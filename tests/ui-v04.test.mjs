@@ -20,10 +20,12 @@ test('pose capture is not hard-capped to 10 fps and smoothing defaults low',()=>
  assert.match(html,/id="smooth"[^>]*value="12"/);
 });
 
-test('screen skeleton drives default mannequin while imported GLB retains its own 3D solver',()=>{
+test('screen skeleton guides default mannequin and independent GLB solver without losing depth',()=>{
  assert.ok(main.includes('deriveMannequinScreenDirections(screenLandmarks,state.visibility)'));
- assert.ok(main.includes('const dirs=screenDirs||worldDirs'));
- assert.ok(main.includes('syncCharacter(state.character?worldDirs:dirs)'));
+ assert.ok(main.includes('mergeScreenGuidedDirections(worldDirs,screenDirs'));
+ assert.ok(main.includes('const dirs=screenDirs?{...screenDirs}:guidedWorld'));
+ assert.ok(main.includes('syncCharacter(state.character?guidedWorld:dirs)'));
+ assert.ok(main.includes('isFrontFacingPose(imageLandmarks,worldDirs.BodyYaw'));
 });
 test('default mannequin now records root heading and recalibration is not GLB-only',()=>{
  assert.ok(main.includes('if(!state.character && Number.isFinite(worldDirs.BodyYaw))'));
